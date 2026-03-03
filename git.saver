@@ -1,0 +1,21 @@
+#!/bin/bash
+
+git diff --name-only | while read line; do
+    git add "$line";
+    git commit -m "updated file - $line"
+done
+git ls-files --exclude-standard -o | while read line; do
+    git add "$line";
+    git commit -m "added file - $line"
+done
+# cat date.list | while read date; do
+	# echo "$date";
+	# sudo timedatectl set-time "$date";
+	# head -n 5 updated_file.list | while read line; do
+	#     git add "$line";
+	#     git commit -m "updated file - $line"
+	# done
+	# git diff --name-only > updated_file.list
+	# git diff --name-only > updated_file.list
+	# git ls-files --exclude-standard -o > updated_file.list
+# done
