@@ -1,0 +1,240 @@
+<clickhouse>
+
+    <!-- ══════════════════════════════════════════════════════════
+         LOGGING
+         Use 'information' in production — 'trace' fills disk fast
+    ══════════════════════════════════════════════════════════ -->
+    <logger>
+        <level>information</level>
+        <console>true</console>
+        <size>1000M</size>
+        <count>10</count>
+    </logger>
+
+
+    <!-- ══════════════════════════════════════════════════════════
+         NETWORK  (server-level — ports, listen address, HTTP config)
+    ══════════════════════════════════════════════════════════ -->
+    <listen_host>0.0.0.0</listen_host>
+    <http_port>8123</http_port>
+    <tcp_port>9000</tcp_port>
+    <mysql_port>9004</mysql_port>
+    <postgresql_port>9005</postgresql_port>
+
+    <!-- HTTP server keep-alive (server-level, different from query receive_timeout) -->
+    <keep_alive_timeout>660</keep_alive_timeout>
+
+    <!-- Max concurrent connections -->
+    <max_connections>4096</max_connections>
+
+
+    <!-- ══════════════════════════════════════════════════════════
+         STORAGE
+    ══════════════════════════════════════════════════════════ -->
+    <path>./</path>
+    <mlock_executable>true</mlock_executable>
+
+
+    <!-- ══════════════════════════════════════════════════════════
+         MEMORY CACHES  (server-level — shared across all queries)
+
+         4 TB RAM budget allocation:
+           mark cache           40 GB   (~1%)
+           uncompressed cache  600 GB   (~15%) — biggest win for repeated reads
+           index cache           8 GB   (~0.2%)
+           remaining          ~3.3 TB  — available for query execution + OS page cache
+    ══════════════════════════════════════════════════════════ -->
+    <mark_cache_size>42949672960</mark_cache_size>                  <!--  40 GB -->
+    <uncompressed_cache_size>644245094400</uncompressed_cache_size>  <!-- 600 GB -->
+    <index_uncompressed_cache_size>8589934592</index_uncompressed_cache_size> <!-- 8 GB -->
+    <index_mark_cache_size>4294967296</index_mark_cache_size>        <!--   4 GB -->
+
+
+    <!-- ══════════════════════════════════════════════════════════
+         BACKGROUND PROCESSING  (server-level — merge/mutation workers)
+
+         384 CPUs:
+           background_pool_size = CPU/4 = 96 for merge workers
+    ══════════════════════════════════════════════════════════ -->
+    <background_pool_size>96</background_pool_size>
+    <background_merges_mutations_concurrency_ratio>4</background_merges_mutations_concurrency_ratio>
+    <background_move_pool_size>16</background_move_pool_size>
+    <background_schedule_pool_size>32</background_schedule_pool_size>
+    <background_common_pool_size>32</background_common_pool_size>
+
+    <!-- Allow merging large parts — important after bulk annotation INSERTs -->
+    <max_bytes_to_merge_at_max_space_in_pool>161061273600</max_bytes_to_merge_at_max_space_in_pool> <!-- 150 GB -->
+
+
+    <!-- ══════════════════════════════════════════════════════════
+         CRASH REPORTS
+    ══════════════════════════════════════════════════════════ -->
+    <send_crash_reports>
+        <enabled>true</enabled>
+        <send_logical_errors>true</send_logical_errors>
+        <endpoint>https://crash.clickhouse.com/</endpoint>
+    </send_crash_reports>
+
+
+    <!-- ══════════════════════════════════════════════════════════
+         CORS HEADERS
+    ══════════════════════════════════════════════════════════ -->
+    <http_options_response>
+        <header>
+            <name>Access-Control-Allow-Origin</name>
+            <value>*</value>
+        </header>
+        <header>
+            <name>Access-Control-Allow-Headers</name>
+            <value>origin, x-requested-with, x-clickhouse-format, x-clickhouse-user, x-clickhouse-key, Authorization</value>
+        </header>
+        <header>
+            <name>Access-Control-Allow-Methods</name>
+            <value>POST, GET, OPTIONS</value>
+        </header>
+        <header>
+            <name>Access-Control-Max-Age</name>
+            <value>86400</value>
+        </header>
+    </http_options_response>
+
+
+    <!-- ══════════════════════════════════════════════════════════
+         USERS
+    ══════════════════════════════════════════════════════════ -->
+    <users>
+        <default>
+            <password/>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <profile>default</profile>
+            <quota>default</quota>
+            <access_management>1</access_management>
+            <named_collection_control>1</named_collection_control>
+        </default>
+    </users>
+
+
+    <!-- ══════════════════════════════════════════════════════════
+         PROFILES  (user-level settings MUST live here)
+
+         default  — interactive requests (status, filter, paginate)
+                    priority=0 (highest), 60s timeout
+         heavy    — background annotation INSERT-SELECT jobs
+                    priority=10 (lower), 30min timeout, 2TB memory
+    ══════════════════════════════════════════════════════════ -->
+    <profiles>
+
+        <default>
+            <!-- ── Timeouts (user-level) ─────────────────────── -->
+            <receive_timeout>120</receive_timeout>
+            <send_timeout>120</send_timeout>
+
+            <!-- ── CPU ──────────────────────────────────────── -->
+            <!-- 0 = auto-detect all available cores (384) -->
+            <max_threads>0</max_threads>
+            <max_insert_threads>0</max_insert_threads>
+
+            <!-- ── Memory ───────────────────────────────────── -->
+            <!-- Single query ceiling: 1 TB -->
+            <max_memory_usage>1099511627776</max_memory_usage>
+            <!-- All queries combined: leave ~200 GB for OS + caches -->
+            <max_memory_usage_for_all_queries>3848290697216</max_memory_usage_for_all_queries>
+
+            <!-- ── Cache ────────────────────────────────────── -->
+            <use_uncompressed_cache>1</use_uncompressed_cache>
+
+            <!-- ── Block sizes ──────────────────────────────── -->
+            <max_block_size>131072</max_block_size>
+            <min_insert_block_size_rows>1048576</min_insert_block_size_rows>
+            <min_insert_block_size_bytes>268435456</min_insert_block_size_bytes>
+
+            <!-- ── JOIN ─────────────────────────────────────── -->
+            <join_algorithm>hash</join_algorithm>
+            <!-- 100 GB hash table — fits 700K variant annotation joins -->
+            <max_bytes_in_join>107374182400</max_bytes_in_join>
+
+            <!-- ── Query optimisations ──────────────────────── -->
+            <optimize_move_to_prewhere>1</optimize_move_to_prewhere>
+            <optimize_read_in_order>1</optimize_read_in_order>
+            <optimize_aggregation_in_order>1</optimize_aggregation_in_order>
+
+            <!-- ── External sort/group fallback ─────────────── -->
+            <max_bytes_before_external_sort>107374182400</max_bytes_before_external_sort>
+            <max_bytes_before_external_group_by>107374182400</max_bytes_before_external_group_by>
+
+            <!-- ── MergeTree read tuning ─────────────────────── -->
+            <merge_tree_min_rows_for_concurrent_read>200000</merge_tree_min_rows_for_concurrent_read>
+            <merge_tree_min_bytes_for_concurrent_read>104857600</merge_tree_min_bytes_for_concurrent_read>
+
+            <!-- ── Priority & timeout ────────────────────────── -->
+            <!-- 0 = highest priority — interactive queries preempt heavy jobs -->
+            <priority>0</priority>
+            <max_execution_time>60</max_execution_time>
+        </default>
+
+
+        <heavy>
+            <!-- ── Timeouts — must exceed max_execution_time ─── -->
+            <receive_timeout>1860</receive_timeout>
+            <send_timeout>1860</send_timeout>
+
+            <!-- ── CPU ──────────────────────────────────────── -->
+            <max_threads>0</max_threads>
+            <max_insert_threads>0</max_insert_threads>
+
+            <!-- ── Memory — 2 TB for large hash joins ─────── -->
+            <max_memory_usage>2199023255552</max_memory_usage>
+
+            <!-- ── Cache ────────────────────────────────────── -->
+            <use_uncompressed_cache>1</use_uncompressed_cache>
+
+            <!-- ── Block sizes ──────────────────────────────── -->
+            <max_block_size>131072</max_block_size>
+            <min_insert_block_size_rows>1048576</min_insert_block_size_rows>
+            <min_insert_block_size_bytes>268435456</min_insert_block_size_bytes>
+
+            <!-- ── JOIN — 200 GB hash table for 8B row scans ── -->
+            <join_algorithm>hash</join_algorithm>
+            <max_bytes_in_join>214748364800</max_bytes_in_join>
+
+            <!-- ── Query optimisations ──────────────────────── -->
+            <optimize_move_to_prewhere>1</optimize_move_to_prewhere>
+            <optimize_read_in_order>1</optimize_read_in_order>
+            <optimize_aggregation_in_order>1</optimize_aggregation_in_order>
+
+            <!-- ── External sort fallback ───────────────────── -->
+            <max_bytes_before_external_sort>214748364800</max_bytes_before_external_sort>
+            <max_bytes_before_external_group_by>214748364800</max_bytes_before_external_group_by>
+
+            <!-- ── MergeTree read tuning ─────────────────────── -->
+            <merge_tree_min_rows_for_concurrent_read>200000</merge_tree_min_rows_for_concurrent_read>
+            <merge_tree_min_bytes_for_concurrent_read>104857600</merge_tree_min_bytes_for_concurrent_read>
+
+            <!-- ── Priority & timeout ────────────────────────── -->
+            <!-- 10 = lower priority — interactive default queries preempt this -->
+            <priority>10</priority>
+            <max_execution_time>1800</max_execution_time>    <!-- 30 min ceiling -->
+        </heavy>
+
+    </profiles>
+
+
+    <!-- ══════════════════════════════════════════════════════════
+         QUOTAS  (unlimited — dedicated single-tenant server)
+    ══════════════════════════════════════════════════════════ -->
+    <quotas>
+        <default>
+            <interval>
+                <duration>3600</duration>
+                <queries>0</queries>
+                <errors>0</errors>
+                <result_rows>0</result_rows>
+                <read_rows>0</read_rows>
+                <execution_time>0</execution_time>
+            </interval>
+        </default>
+    </quotas>
+
+</clickhouse>
