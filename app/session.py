@@ -1,17 +1,24 @@
+import urllib3
 import clickhouse_connect
 from functools import lru_cache
+from sqlalchemy import create_engine
+from sqlalchemy.orm import registry, sessionmaker
 
 # --- Configuration ---
-# You can load these from .env or os.getenv() just like your example
-CLICKHOUSE_HOST = "10.10.9.24"
 CLICKHOUSE_PORT = 80
+CLICKHOUSE_PASSWORD = ""
 CLICKHOUSE_DB = "nc_spark"
 CLICKHOUSE_USER = "default"
-CLICKHOUSE_PASSWORD = ""
+CLICKHOUSE_HOST = "10.10.9.24"
+SQLALCHEMY_DATABASE_URL = "sqlite:///database/database.sqlite3"
 
-# This is the equivalent of your 'engine = create_engine(...)'
-# It's created ONCE when the app starts.
-# It manages the connection pool.
+engine = create_engine(
+    SQLALCHEMY_DATABASE_URL,
+    connect_args={"check_same_thread": False}
+    if "sqlite" in SQLALCHEMY_DATABASE_URL
+    else {},
+)
+
 try:
     _client = clickhouse_connect.get_client(
         interface="http",
@@ -28,9 +35,6 @@ except Exception as e:
     _client = None
 
 
-# This is the equivalent of your 'get_db()' dependency
-# We use @lru_cache(maxsize=1) as a trick to ensure
-# it just returns the same client object without re-evaluating.
 @lru_cache(maxsize=1)
 def get_clickhouse_client_cached():
     """
@@ -46,13 +50,6 @@ def get_clickhouse_client_cached():
 def get_db():
     """
     FastAPI Dependency to get the ClickHouse client.
-
-    This is different from SQLAlchemy:
-    - We are NOT creating a new session.
-    - We are NOT closing anything.
-
-    The client object manages its own connection pool and is
-    meant to be long-lived and shared.
     """
     client = get_clickhouse_client_cached()
     try:
@@ -61,3 +58,51 @@ def get_db():
         # We do NOT client.close() here.
         # The client lives for the life of the app.
         pass
+
+
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+mapper_registry = registry()
+Base = mapper_registry.generate_base()
+
+
+# ── Fresh client for background tasks ─────────
+def get_background_client():
+    """
+    Always creates a new client instance.
+    Background tasks must NEVER share a client with request-scoped queries.
+    """
+    background_pool = urllib3.PoolManager(
+        num_pools=1,
+        maxsize=2,
+        headers={"Connection": "close"},  # disable keep-alive for background client
+    )
+
+    return clickhouse_connect.get_client(
+        interface="http",
+        host=CLICKHOUSE_HOST,
+        port=CLICKHOUSE_PORT,
+        user=CLICKHOUSE_USER,
+        database=CLICKHOUSE_DB,
+        proxy_path="clickhouse/",
+        pool_mgr=background_pool,
+        send_receive_timeout=1860,
+        password=CLICKHOUSE_PASSWORD,
+        autogenerate_session_id=False,
+        settings={
+            "priority": 10,
+            "max_threads": 0,
+            "max_insert_threads": 0,
+            "join_algorithm": "hash",
+            "max_block_size": 131072,
+            "max_execution_time": 1800,
+            "use_uncompressed_cache": 1,
+            "optimize_read_in_order": 1,
+            "optimize_move_to_prewhere": 1,
+            "max_memory_usage": 2199023255552,
+            "max_bytes_in_join": 214748364800,
+            "optimize_aggregation_in_order": 1,
+            "min_insert_block_size_rows": 1048576,
+            "min_insert_block_size_bytes": 268435456,
+            "max_bytes_before_external_sort": 214748364800,
+        },
+    )
