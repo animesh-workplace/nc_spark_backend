@@ -1,9 +1,10 @@
 import clickhouse_connect
 from app.session import get_db
 from typing import List, Dict, Any
+from fastapi import BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, Depends, APIRouter, HTTPException
-from app.api.annotate import get_filtered_variants, upload_variants
+from app.api.annotate import get_filtered_variants, upload_variants, get_session_status
 from app.schema import (
     VariantInput,
     FilterRequest,
@@ -19,9 +20,10 @@ BASE_URL = "/nvpp/api/v1"
 @api_router.post("/upload_variants", response_model=UploadResponse)
 def UPLOAD_VARIANTS(
     variants: List[VariantInput],
+    background_tasks: BackgroundTasks,
     session: clickhouse_connect.driver.Client = Depends(get_db),
 ):
-    return upload_variants(variants, session)
+    return upload_variants(variants, session, background_tasks)
 
 
 @api_router.post("/get_filtered_variants", response_model=FilterResponse)
@@ -33,26 +35,11 @@ def GET_FILTERED_VARIANTS(
 
 
 @api_router.get("/status/{session_id}", response_model=StatusResponse)
-def GET_STATUS(
-    session_id: str,
-    session: clickhouse_connect.driver.Client = Depends(get_db),
-):
-    result = session.query(
-        """
-        SELECT session_id, status, variant_count, error_msg
-        FROM nc_spark.session_status
-        FINAL
-        WHERE session_id = {sid:String}
-        LIMIT 1
-        """,
-        parameters={"sid": session_id},
-    )
-    if not result.result_rows:
+def GET_STATUS(session_id: str):
+    session = get_session_status(session_id)
+    if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-
-    cols = result.column_names
-    row = dict(zip(cols, result.result_rows[0]))
-    return row
+    return session.to_dict()
 
 
 app = FastAPI(
