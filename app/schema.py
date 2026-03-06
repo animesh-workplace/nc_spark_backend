@@ -1,4 +1,5 @@
 from enum import Enum
+from datetime import datetime
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 
@@ -46,5 +47,16 @@ class FilterResponse(BaseModel):
 class StatusResponse(BaseModel):
     session_id: str
     status: str
+    genome: str
     variant_count: int
-    error_msg: Optional[str] = None
+    annotated_count: int
+    vcf_hash: str | None
+    error_message: str | None
+    celery_task_id: str | None
+    queue_name: str | None
+    from_cache: bool
+    created_at: datetime | None
+    queued_at: datetime | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    expires_at: datetime | None
