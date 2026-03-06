@@ -311,7 +311,7 @@ def get_filtered_variants(request, session):
 
         main_result = session.query(
             f"""
-            SELECT *
+            SELECT * EXCEPT (FATHMM_MKL_CODING, CSCAPE_CODING, FATHMM_XF_CODING)
             FROM nc_spark.user_results
             WHERE session_id = {{sid:String}}
             ORDER BY {sort_by} {sort_order}
