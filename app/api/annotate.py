@@ -1,29 +1,113 @@
+import time
 import uuid
-from typing import Optional
-from pydantic import BaseModel
 from fastapi import HTTPException
 from fastapi import BackgroundTasks
+from app.models import SessionStatus
+from datetime import datetime, timezone, timedelta
+from app.session import get_background_client, SessionLocal
 
 
 # utils.py
+# def set_session_status(
+#     session, session_id: str, status: str, variant_count: int = 0, error_msg: str = None
+# ):
+#     session.command(
+#         """
+#         INSERT INTO nc_spark.session_status
+#             (session_id, status, variant_count, error_msg, updated_at)
+#         VALUES
+#             ({sid:String}, {status:String}, {count:UInt32},
+#              {err:Nullable(String)}, now())
+#         """,
+#         parameters={
+#             "sid": session_id,
+#             "status": status,
+#             "count": variant_count,
+#             "err": error_msg,
+#         },
+#     )
+
+
+_STATUS_TIMESTAMP = {
+    "queued": "queued_at",
+    "processing": "started_at",
+    "complete": "completed_at",
+    "error": "completed_at",
+}
+
+
+def get_session_status(session_id: str) -> SessionStatus | None:
+    db = SessionLocal()
+    try:
+        return db.get(SessionStatus, session_id)
+    finally:
+        db.close()
+
+
 def set_session_status(
-    session, session_id: str, status: str, variant_count: int = 0, error_msg: str = None
-):
-    session.command(
-        """
-        INSERT INTO nc_spark.session_status
-            (session_id, status, variant_count, error_msg, updated_at)
-        VALUES
-            ({sid:String}, {status:String}, {count:UInt32}, 
-             {err:Nullable(String)}, now())
-        """,
-        parameters={
-            "sid": session_id,
-            "status": status,
-            "count": variant_count,
-            "err": error_msg,
-        },
-    )
+    session_id: str,
+    *,
+    # create-only fields
+    genome: str = None,
+    ttl_hours: int = 24,
+    vcf_hash: str = None,
+    queue_name: str = None,
+    variant_count: int = None,
+    # update fields
+    status: str = None,
+    from_cache: bool = False,
+    error_message: str = None,
+    celery_task_id: str = None,
+    annotated_count: int = None,
+) -> SessionStatus:
+    """
+    Creates or updates a session_status record.
+    Manages its own DB connection internally.
+    """
+    db = SessionLocal()
+    try:
+        session = db.get(SessionStatus, session_id)
+
+        if session is None:
+            # ── CREATE ────────────────────────────────────────────
+            session = SessionStatus(
+                vcf_hash=vcf_hash,
+                session_id=session_id,
+                from_cache=from_cache,
+                genome=genome or "hg19",
+                status=status or "pending",
+                variant_count=variant_count or 0,
+                queue_name=queue_name or "large",
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=ttl_hours),
+            )
+            db.add(session)
+
+        else:
+            # ── UPDATE ────────────────────────────────────────────
+            if status is not None:
+                session.status = status
+                ts_field = _STATUS_TIMESTAMP.get(status)
+                if ts_field:
+                    setattr(session, ts_field, datetime.now(timezone.utc))
+
+            if annotated_count is not None:
+                session.annotated_count = annotated_count
+            if error_message is not None:
+                session.error_message = error_message
+            if celery_task_id is not None:
+                session.celery_task_id = celery_task_id
+            if from_cache:
+                session.from_cache = True
+
+        db.commit()
+        db.refresh(session)
+        return session
+
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 
 # tasks.py
@@ -32,62 +116,106 @@ def materialise_annotations(session_id: str, variant_count: int):
     Runs after the HTTP response is already sent.
     Uses a fresh client — NOT the request-scoped one which is already closed.
     """
-    from session import get_clickhouse_client_cached
+    start_time = time.perf_counter()
+    print(
+        "Starting background task to materialise annotations for session:", session_id
+    )
+    session = get_background_client()
 
-    session = get_clickhouse_client_cached()
-
-    set_session_status(session, session_id, "processing", variant_count)
+    set_session_status(
+        session_id=session_id, status="processing", variant_count=variant_count
+    )
 
     try:
+        print(
+            f"Materialising annotations for session {session_id} with {variant_count} variants..."
+        )
         session.command(
             """
             INSERT INTO nc_spark.user_results
                 (session_id, chr, pos, ref, alt,
-                 GPN, GERP, NCER, DANN,
-                 REPLISEQ_S2, REPLISEQ_G1B, REPLISEQ_S4, REPLISEQ_S1,
-                 REPLISEQ_G2, REPLISEQ_S3,
-                 FATHMM_MKL_CODING, FATHMM_MKL_NONCODING,
-                 ORION, CSCAPE_NONCODING, CSCAPE_CODING,
-                 CADD, PhyloP_100way, PhyloP_30way,
-                 LINSIGHT, JARVIS, REMM, FIRE, FUNSEQ2,
-                 FATHMM_XF_NONCODING, FATHMM_XF_CODING,
-                 MACIE_REGULATORY, MACIE_CONSERVED,
-                 REGULOMEDB, GWRVIS, mean, median, max, min)
+                CADD, CSCAPE_NONCODING, DANN,FATHMM_MKL_NONCODING,FATHMM_XF_NONCODING,
+                GPN, GWRVIS, JARVIS, LINSIGHT, NCER, ORION, REMM,
+                GERP, PhyloP_100way, PhyloP_30way, MACIE_CONSERVED,
+                FUNSEQ2, FIRE, REGULOMEDB, MACIE_REGULATORY,
+                REPLISEQ_S2, REPLISEQ_G1B, REPLISEQ_S4, REPLISEQ_S1, REPLISEQ_G2, REPLISEQ_S3,
+                pathogenicity_mean, pathogenicity_median, pathogenicity_min, pathogenicity_max,
+                regulatory_mean,    regulatory_median,    regulatory_min,    regulatory_max,
+                conservation_mean,  conservation_median,  conservation_min,  conservation_max,
+                replication_timing_mean, replication_timing_median, replication_timing_min, replication_timing_max,
+                trinucleotide,
+                gene_if_overlapping,
+                nearest_gene_plus,  plus_distance,
+                nearest_gene_minus, minus_distance)
+            WITH uploaded AS (
+                SELECT chr, pos, ref, alt
+                FROM nc_spark.user_uploads
+                WHERE session_id = {sid:String}
+            )
             SELECT
-                {sid:String} AS session_id, *
-            FROM nc_spark.scores_hg19_normalized
-            PREWHERE pos IN (
-                SELECT DISTINCT pos FROM nc_spark.user_uploads
-                WHERE session_id = {sid:String}
-            )
-            WHERE (chr, pos, ref, alt) IN (
-                SELECT chr, pos, ref, alt FROM nc_spark.user_uploads
-                WHERE session_id = {sid:String}
-            )
-            SETTINGS join_algorithm = 'hash',
-                     max_execution_time = 600    -- 10 min ceiling for 7 lakh rows
+                {sid:String} AS session_id,
+                s.chr, s.pos, s.ref, s.alt,
+                s.CADD, s.CSCAPE_NONCODING, s.DANN,s.FATHMM_MKL_NONCODING,s.FATHMM_XF_NONCODING,
+                s.GPN, s.GWRVIS, s.JARVIS, s.LINSIGHT, s.NCER, s.ORION, s.REMM,
+                s.GERP, s.PhyloP_100way, s.PhyloP_30way, s.MACIE_CONSERVED,
+                s.FUNSEQ2, s.FIRE, s.REGULOMEDB, s.MACIE_REGULATORY,
+                s.REPLISEQ_S2, s.REPLISEQ_G1B, s.REPLISEQ_S4, s.REPLISEQ_S1, s.REPLISEQ_G2, s.REPLISEQ_S3,
+                s.pathogenicity_mean, s.pathogenicity_median, s.pathogenicity_min, s.pathogenicity_max,
+                s.regulatory_mean,    s.regulatory_median,    s.regulatory_min,    s.regulatory_max,
+                s.conservation_mean,  s.conservation_median,  s.conservation_min,  s.conservation_max,
+                s.replication_timing_mean, s.replication_timing_median, s.replication_timing_min, s.replication_timing_max,
+                s.trinucleotide,
+                COALESCE(g.gene_if_overlapping, '')  AS gene_if_overlapping,
+                COALESCE(g.nearest_gene_plus,   '')  AS nearest_gene_plus,
+                g.plus_distance                      AS plus_distance,
+                COALESCE(g.nearest_gene_minus,  '')  AS nearest_gene_minus,
+                g.minus_distance                     AS minus_distance
+            FROM nc_spark.scores_hg19_normalized s
+            LEFT JOIN nc_spark.nearest_gene_hg19 g
+                ON s.chr = g.chr AND s.pos = g.pos
+            PREWHERE s.pos IN (SELECT DISTINCT pos FROM uploaded)
+            WHERE (s.chr, s.pos, s.ref, s.alt) IN (SELECT chr, pos, ref, alt FROM uploaded)
+            SETTINGS
+                join_algorithm = 'hash'
             """,
             parameters={"sid": session_id},
         )
-        set_session_status(session, session_id, "complete", variant_count)
+
+        end_time = time.perf_counter()
+        print(
+            f"Completed materialisation for session {session_id} in {end_time - start_time:.2f} seconds."
+        )
+        set_session_status(
+            session_id=session_id, status="complete", variant_count=variant_count
+        )
 
     except Exception as e:
-        set_session_status(session, session_id, "error", variant_count, str(e))
+        error_client = get_background_client()
+        set_session_status(
+            session_id=session_id,
+            status="error",
+            variant_count=variant_count,
+            error_message=str(e),
+        )
+        print(f"ERROR: Materialisation failed for session {session_id}. {e}")
         # Clean up partial data
         try:
-            session.command(
+            error_client.command(
                 "ALTER TABLE nc_spark.user_uploads DELETE WHERE session_id = {sid:String}",
                 parameters={"sid": session_id},
             )
-            session.command(
+            error_client.command(
                 "ALTER TABLE nc_spark.user_results DELETE WHERE session_id = {sid:String}",
                 parameters={"sid": session_id},
             )
+            error_client.close()
         except Exception:
             pass
+    finally:
+        session.close()
 
 
-def upload_variants(variants, session):
+def upload_variants(variants, session, background_tasks: BackgroundTasks):
     """
     1. Inserts raw user variants into user_uploads.
     2. Materialises the annotation join into user_results (once, at upload time).
@@ -110,52 +238,10 @@ def upload_variants(variants, session):
         raise HTTPException(status_code=500, detail=f"Failed to upload variants: {e}")
 
     # ── Step 2: materialise annotation join into user_results ─────────────────
-    try:
-        session.command(
-            """
-            INSERT INTO nc_spark.user_results
-                (session_id, chr, pos, ref, alt,
-                GPN, GERP, NCER, DANN,
-                REPLISEQ_S2, REPLISEQ_G1B, REPLISEQ_S4, REPLISEQ_S1, REPLISEQ_G2, REPLISEQ_S3,
-                FATHMM_MKL_CODING, FATHMM_MKL_NONCODING,
-                ORION, CSCAPE_NONCODING, CSCAPE_CODING,
-                CADD, PhyloP_100way, PhyloP_30way,
-                LINSIGHT, JARVIS, REMM, FIRE, FUNSEQ2,
-                FATHMM_XF_NONCODING, FATHMM_XF_CODING,
-                MACIE_REGULATORY, MACIE_CONSERVED,
-                REGULOMEDB, GWRVIS,
-                mean, median, max, min)   -- created_at intentionally omitted → uses DEFAULT now()
-            SELECT
-                {sid:String} AS session_id,
-                *
-            FROM nc_spark.scores_hg19_normalized
-            PREWHERE pos IN (
-                SELECT DISTINCT pos
-                FROM nc_spark.user_uploads
-                WHERE session_id = {sid:String}
-            )
-            WHERE (chr, pos, ref, alt) IN (
-                SELECT chr, pos, ref, alt
-                FROM nc_spark.user_uploads
-                WHERE session_id = {sid:String}
-            )
-            SETTINGS join_algorithm = 'hash',
-                    max_execution_time = 120
-            """,
-            parameters={"sid": session_id},
-        )
-    except Exception as e:
-        # Clean up the raw upload so the session isn't left in a half-ready state
-        try:
-            session.command(
-                "ALTER TABLE nc_spark.user_uploads DELETE WHERE session_id = {sid:String}",
-                parameters={"sid": session_id},
-            )
-        except Exception:
-            pass  # best-effort cleanup, don't mask the original error
-        raise HTTPException(
-            status_code=500, detail=f"Failed to materialise annotations: {e}"
-        )
+    set_session_status(
+        session_id=session_id, status="pending", variant_count=len(rows_to_insert)
+    )
+    background_tasks.add_task(materialise_annotations, session_id, len(rows_to_insert))
 
     return {
         "session_id": session_id,
@@ -186,80 +272,115 @@ def upload_variants(variants, session):
 
 
 def get_filtered_variants(request, session):
+    print(f"Received filter request for session_id: {request.session_id}")
     session_id = request.session_id
     page = getattr(request, "page", 1)
     page_size = getattr(request, "page_size", 20)
     offset = (page - 1) * page_size
     sort_by = getattr(request, "sort_by", None) or "chr"
-    # Always call .value if it's an enum, then uppercase for SQL
     _sort_order = getattr(request, "sort_order", None) or "asc"
     sort_order = (
         _sort_order.value if hasattr(_sort_order, "value") else _sort_order
     ).upper()
 
+    ALLOWED_SORT_COLUMNS = {"chr", "pos", "ref", "alt", "mean", "max", "CADD", "DANN"}
+    ALLOWED_SORT_ORDERS = {"ASC", "DESC"}
+    if sort_by not in ALLOWED_SORT_COLUMNS:
+        raise HTTPException(status_code=400, detail=f"Invalid sort column: {sort_by}")
+    if sort_order not in ALLOWED_SORT_ORDERS:
+        raise HTTPException(status_code=400, detail=f"Invalid sort order: {sort_order}")
+
     try:
-        # ── Phase 1: fetch the 99 user variants (tiny, fast) ──────────────────
-        user_variants_result = session.query(
+        total_results = session.command(
             """
-            SELECT chr, pos, ref, alt
-            FROM nc_spark.user_uploads
+            SELECT COUNT(*)
+            FROM nc_spark.user_results
             WHERE session_id = {sid:String}
             """,
             parameters={"sid": session_id},
         )
-        user_rows = user_variants_result.result_rows  # list of (chr, pos, ref, alt)
-        print(f"User has {len(user_rows)} uploaded variants for session {session_id}.")
 
-        if not user_rows:
+        if total_results == 0:
             return {
-                "data": [],
-                "total_count": 0,
+                "results": [],
+                "total_results": 0,
                 "total_pages": 0,
                 "page": page,
                 "page_size": page_size,
             }
 
-        # ── Phase 2: use extracted positions to guide primary key index ────────
         main_result = session.query(
             f"""
             SELECT *
-            FROM nc_spark.scores_hg19_normalized
-            PREWHERE pos IN (
-                SELECT DISTINCT pos
-                FROM nc_spark.user_uploads
-                WHERE session_id = {{sid:String}}
-            )
-            WHERE (chr, pos, ref, alt) IN (
-                SELECT chr, pos, ref, alt
-                FROM nc_spark.user_uploads
-                WHERE session_id = {{sid:String}}
-            )
+            FROM nc_spark.user_results
+            WHERE session_id = {{sid:String}}
             ORDER BY {sort_by} {sort_order}
             LIMIT {{page_size:UInt32}}
             OFFSET {{offset:UInt32}}
             """,
-            parameters={
-                "sid": session_id,
-                "page_size": page_size,
-                "offset": offset,
-            },
-            settings={
-                "join_algorithm": "hash",
-                "max_execution_time": 30,
-            },
+            parameters={"sid": session_id, "page_size": page_size, "offset": offset},
         )
 
-        total_count = len(user_rows)  # already known from phase 1
-        total_pages = (total_count + page_size - 1) // page_size
         cols = main_result.column_names
-        rows = [dict(zip(cols, row)) for row in main_result.result_rows]
+        FLOAT_COLUMNS = {
+            "GPN",
+            "GERP",
+            "NCER",
+            "DANN",
+            "REPLISEQ_S2",
+            "REPLISEQ_G1B",
+            "REPLISEQ_S4",
+            "REPLISEQ_S1",
+            "REPLISEQ_G2",
+            "REPLISEQ_S3",
+            "FATHMM_MKL_NONCODING",
+            "ORION",
+            "CSCAPE_NONCODING",
+            "CADD",
+            "PhyloP_100way",
+            "PhyloP_30way",
+            "LINSIGHT",
+            "JARVIS",
+            "REMM",
+            "FIRE",
+            "FUNSEQ2",
+            "FATHMM_XF_NONCODING",
+            "MACIE_REGULATORY",
+            "MACIE_CONSERVED",
+            "REGULOMEDB",
+            "GWRVIS",
+            "pathogenicity_mean",
+            "pathogenicity_median",
+            "pathogenicity_min",
+            "pathogenicity_max",
+            "regulatory_mean",
+            "regulatory_median",
+            "regulatory_min",
+            "regulatory_max",
+            "conservation_mean",
+            "conservation_median",
+            "conservation_min",
+            "conservation_max",
+            "replication_timing_mean",
+            "replication_timing_median",
+            "replication_timing_min",
+            "replication_timing_max",
+        }
+
+        rows = [
+            {
+                k: round(v, 2) if k in FLOAT_COLUMNS and v is not None else v
+                for k, v in dict(zip(cols, row)).items()
+            }
+            for row in main_result.result_rows
+        ]
 
         return {
             "page": page,
             "results": rows,
             "page_size": page_size,
-            "total_pages": total_pages,
-            "total_results": total_count,
+            "total_results": total_results,
+            "total_pages": (total_results + page_size - 1) // page_size,
         }
 
     except Exception as e:
