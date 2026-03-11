@@ -60,3 +60,66 @@ class StatusResponse(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     expires_at: datetime | None
+
+
+class ReplicationRadarResponse(BaseModel):
+    S1: float | None
+    S2: float | None
+    S3: float | None
+    S4: float | None
+    G1B: float | None
+    G2: float | None
+
+
+class DistributionBin(BaseModel):
+    bin_start: float
+    bin_end: float
+    count: int
+
+
+class ScoreDistribution(BaseModel):
+    score: str
+    bins: list[DistributionBin]
+
+
+PATHOGENICITY_SCORES = [
+    "GPN",
+    "DANN",
+    "CADD",
+    "ORION",
+    "FATHMM_MKL_NONCODING",
+    "CSCAPE_NONCODING",
+    "FATHMM_XF_NONCODING",
+]
+
+CONSERVATION_SCORES = [
+    "GERP",
+    "NCER",
+    "PhyloP_100way",
+    "PhyloP_30way",
+    "LINSIGHT",
+    "JARVIS",
+    "REMM",
+    "MACIE_REGULATORY",
+    "MACIE_CONSERVED",
+    "GWRVIS",
+]
+
+REGULATORY_SCORES = [
+    "FIRE",
+    "FUNSEQ2",
+    "REGULOMEDB",
+]
+
+REPLICATION_SCORES = [
+    "REPLISEQ_S1",
+    "REPLISEQ_S2",
+    "REPLISEQ_S3",
+    "REPLISEQ_S4",
+    "REPLISEQ_G1B",
+    "REPLISEQ_G2",
+]
+
+ALL_SCORES = (
+    PATHOGENICITY_SCORES + CONSERVATION_SCORES + REGULATORY_SCORES + REPLICATION_SCORES
+)
