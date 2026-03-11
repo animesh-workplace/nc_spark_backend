@@ -122,6 +122,8 @@ def materialise_annotations(session_id: str, variant_count: int):
     )
     session = get_background_client()
 
+    session_info = get_session_status(session_id)
+
     set_session_status(
         session_id=session_id, status="processing", variant_count=variant_count
     )
@@ -130,8 +132,10 @@ def materialise_annotations(session_id: str, variant_count: int):
         print(
             f"Materialising annotations for session {session_id} with {variant_count} variants..."
         )
-        session.command(
-            """
+        scores_table = f"nc_spark.scores_{session_info.genome}_normalized"
+        gene_table = f"nc_spark.nearest_gene_{session_info.genome}"
+
+        query = f"""
             INSERT INTO nc_spark.user_results
                 (session_id, chr, pos, ref, alt,
                 CADD, CSCAPE_NONCODING, DANN,FATHMM_MKL_NONCODING,FATHMM_XF_NONCODING,
@@ -150,10 +154,10 @@ def materialise_annotations(session_id: str, variant_count: int):
             WITH uploaded AS (
                 SELECT chr, pos, ref, alt
                 FROM nc_spark.user_uploads
-                WHERE session_id = {sid:String}
+                WHERE session_id = {{sid:String}}
             )
             SELECT
-                {sid:String} AS session_id,
+                {{sid:String}} AS session_id,
                 s.chr, s.pos, s.ref, s.alt,
                 s.CADD, s.CSCAPE_NONCODING, s.DANN,s.FATHMM_MKL_NONCODING,s.FATHMM_XF_NONCODING,
                 s.GPN, s.GWRVIS, s.JARVIS, s.LINSIGHT, s.NCER, s.ORION, s.REMM,
@@ -170,14 +174,18 @@ def materialise_annotations(session_id: str, variant_count: int):
                 g.plus_distance                      AS plus_distance,
                 COALESCE(g.nearest_gene_minus,  '')  AS nearest_gene_minus,
                 g.minus_distance                     AS minus_distance
-            FROM nc_spark.scores_hg19_normalized s
-            LEFT JOIN nc_spark.nearest_gene_hg19 g
+            FROM {scores_table} s
+            LEFT JOIN {gene_table} g
                 ON s.chr = g.chr AND s.pos = g.pos
             PREWHERE s.pos IN (SELECT DISTINCT pos FROM uploaded)
             WHERE (s.chr, s.pos, s.ref, s.alt) IN (SELECT chr, pos, ref, alt FROM uploaded)
             SETTINGS
                 join_algorithm = 'hash'
-            """,
+            """
+        print(scores_table, gene_table, query)
+
+        session.command(
+            query,
             parameters={"sid": session_id},
         )
 
@@ -192,10 +200,10 @@ def materialise_annotations(session_id: str, variant_count: int):
     except Exception as e:
         error_client = get_background_client()
         set_session_status(
-            session_id=session_id,
             status="error",
-            variant_count=variant_count,
             error_message=str(e),
+            session_id=session_id,
+            variant_count=variant_count,
         )
         print(f"ERROR: Materialisation failed for session {session_id}. {e}")
         # Clean up partial data
@@ -215,7 +223,7 @@ def materialise_annotations(session_id: str, variant_count: int):
         session.close()
 
 
-def upload_variants(variants, session, background_tasks: BackgroundTasks):
+def upload_variants(variants, genome, session, background_tasks: BackgroundTasks):
     """
     1. Inserts raw user variants into user_uploads.
     2. Materialises the annotation join into user_results (once, at upload time).
@@ -239,7 +247,10 @@ def upload_variants(variants, session, background_tasks: BackgroundTasks):
 
     # ── Step 2: materialise annotation join into user_results ─────────────────
     set_session_status(
-        session_id=session_id, status="pending", variant_count=len(rows_to_insert)
+        genome=genome,
+        status="pending",
+        session_id=session_id,
+        variant_count=len(rows_to_insert),
     )
     background_tasks.add_task(materialise_annotations, session_id, len(rows_to_insert))
 
