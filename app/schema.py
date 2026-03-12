@@ -62,13 +62,23 @@ class StatusResponse(BaseModel):
     expires_at: datetime | None
 
 
+class RadarDataPoint(BaseModel):
+    name: str
+    value: List[float]
+
+
+class ReplicationStats(BaseModel):
+    early_score: float  # mean(S1, S2)
+    late_score: float  # mean(S3, S4, G2)
+    rt_score: float  # log2(early / late), canonical RT metric
+    early_dominance_pct: float  # early_score / (early + late) * 100
+    g1b_baseline: float  # G1B reference mean
+
+
 class ReplicationRadarResponse(BaseModel):
-    S1: float | None
-    S2: float | None
-    S3: float | None
-    S4: float | None
-    G1B: float | None
-    G2: float | None
+    indicator: List[dict]
+    series_data: List[RadarDataPoint]
+    stats: ReplicationStats
 
 
 class DistributionBin(BaseModel):
