@@ -1,3 +1,4 @@
+import math
 import clickhouse_connect
 from app.session import get_db
 from typing import List, Dict, Any
@@ -6,15 +7,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, Depends, APIRouter, HTTPException
 from app.api.annotate import get_filtered_variants, upload_variants, get_session_status
 from app.schema import (
+    ALL_SCORES,
     VariantInput,
     FilterRequest,
     UploadResponse,
     FilterResponse,
     StatusResponse,
-    ScoreDistribution,
+    RadarDataPoint,
     DistributionBin,
+    ReplicationStats,
+    ScoreDistribution,
     ReplicationRadarResponse,
-    ALL_SCORES,
 )
 
 api_router = APIRouter()
@@ -52,23 +55,90 @@ def GET_REPLICATION_RADAR(
     session_id: str,
     db: clickhouse_connect.driver.Client = Depends(get_db),
 ):
+    indicator = [
+        {"name": "G1B"},
+        {"name": "S1"},
+        {"name": "S2"},
+        {"name": "S3"},
+        {"name": "S4"},
+        {"name": "G2"},
+    ]
+
     result = db.query(
         """
         SELECT
-            round(avg(REPLISEQ_S1),  4) AS S1,
-            round(avg(REPLISEQ_S2),  4) AS S2,
-            round(avg(REPLISEQ_S3),  4) AS S3,
-            round(avg(REPLISEQ_S4),  4) AS S4,
-            round(avg(REPLISEQ_G1B), 4) AS G1B,
-            round(avg(REPLISEQ_G2),  4) AS G2
+            REPLISEQ_G1B,
+            REPLISEQ_S1,
+            REPLISEQ_S2,
+            REPLISEQ_S3,
+            REPLISEQ_S4,
+            REPLISEQ_G2
         FROM nc_spark.user_results
         WHERE session_id = {sid:String}
         """,
         parameters={"sid": session_id},
     )
-    row = result.result_rows[0]
+
+    rows = result.result_rows
+
+    # Guard: no data found for this session_id
+    if not rows:
+        return ReplicationRadarResponse(indicator=indicator, series_data=[])
+
+    series_data = [
+        RadarDataPoint(
+            name=f"Row {i + 1}",
+            value=[round(v, 4) if v is not None else 0.0 for v in row],
+        )
+        for i, row in enumerate(rows)
+    ]
+
+    def safe_mean(vals):
+        clean = [v for v in vals if v is not None]
+        return round(sum(clean) / len(clean), 4) if clean else 0.0
+
+    def safe_median(vals):
+        s = sorted(v for v in vals if v is not None)
+        n = len(s)
+        if not s:
+            return 0.0
+        mid = n // 2
+        return round((s[mid] if n % 2 != 0 else (s[mid - 1] + s[mid]) / 2), 4)
+
+    means = [safe_mean([row[i] for row in rows]) for i in range(6)]
+    medians = [safe_median([row[i] for row in rows]) for i in range(6)]
+
+    series_data.append(RadarDataPoint(name="Mean", value=means))
+    series_data.append(RadarDataPoint(name="Median", value=medians))
+
+    phase_names = ["G1B", "S1", "S2", "S3", "S4", "G2"]
+    means_by_name = dict(zip(phase_names, means))
+
+    early_score = safe_mean([means_by_name["S1"], means_by_name["S2"]])
+    late_score = safe_mean(
+        [means_by_name["S3"], means_by_name["S4"], means_by_name["G2"]]
+    )
+    rt_score = (
+        round(math.log2(early_score / late_score), 4)
+        if late_score > 0 and early_score > 0
+        else 0.0
+    )
+    early_dom = (
+        round((early_score / (early_score + late_score)) * 100, 2)
+        if (early_score + late_score) > 0
+        else 0.0
+    )
+
+    stats = ReplicationStats(
+        early_score=early_score,
+        late_score=late_score,
+        rt_score=rt_score,
+        early_dominance_pct=early_dom,
+        g1b_baseline=means_by_name["G1B"],
+    )
+
     return ReplicationRadarResponse(
-        S1=row[0], S2=row[1], S3=row[2], S4=row[3], G1B=row[4], G2=row[5]
+        indicator=indicator, series_data=series_data, stats=stats
     )
 
 
