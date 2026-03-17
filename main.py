@@ -1,7 +1,7 @@
 import math
 import clickhouse_connect
 from app.session import get_db
-from typing import List, Dict, Any
+from typing import List, Literal
 from fastapi import BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, Depends, APIRouter, HTTPException
@@ -16,6 +16,7 @@ from app.schema import (
     RadarDataPoint,
     DistributionBin,
     ReplicationStats,
+    BarChartResponse,
     ScoreDistribution,
     ReplicationRadarResponse,
 )
@@ -48,6 +49,142 @@ def GET_STATUS(session_id: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     return session.to_dict()
+
+
+@api_router.get(
+    "/{session_id}/variants-per-chromosome", response_model=BarChartResponse
+)
+def GET_VARIANTS_PER_CHROMOSOME(
+    session_id: str,
+    mode: Literal[
+        "count", "frequency"
+    ] = "count",  # count makes more sense as default here
+    db: clickhouse_connect.driver.Client = Depends(get_db),
+):
+    result = db.query(
+        """
+        SELECT
+            chr,
+            count() AS cnt
+        FROM nc_spark.user_results
+        WHERE session_id = {sid:String}
+          AND chr IS NOT NULL
+          AND chr != ''
+        GROUP BY chr
+        """,
+        parameters={"sid": session_id},
+    )
+
+    rows = result.result_rows
+
+    if not rows:
+        return BarChartResponse(categories=[], data=[[]], mode=mode)
+
+    categories = [row[0] for row in rows]
+    counts = [row[1] for row in rows]
+
+    if mode == "frequency":
+        total = sum(counts)
+        values = [round(c / total, 4) for c in counts]
+    else:
+        values = [float(c) for c in counts]
+
+    # Natural sort so chr1 < chr2 < ... < chr10 < chrX < chrY < chrMT
+    def chrom_sort_key(pair):
+        chrom = pair[0].replace("chr", "").replace("CHR", "")
+        order = {"X": 23, "Y": 24, "MT": 25, "M": 25}
+        try:
+            return order.get(chrom, int(chrom))
+        except ValueError:
+            return 99  # unknown contigs go last
+
+    sorted_pairs = sorted(zip(categories, values), key=chrom_sort_key)
+    categories, values = map(list, zip(*sorted_pairs))
+
+    return BarChartResponse(categories=categories, data=[values], mode=mode)
+
+
+@api_router.get("/{session_id}/trinucleotide", response_model=BarChartResponse)
+def GET_TRINUCLEOTIDE_BARCHART(
+    session_id: str,
+    mode: Literal["count", "frequency"] = "frequency",
+    db: clickhouse_connect.driver.Client = Depends(get_db),
+):
+    result = db.query(
+        """
+        SELECT
+            trinucleotide,
+            count() AS cnt
+        FROM nc_spark.user_results
+        WHERE session_id = {sid:String}
+          AND trinucleotide IS NOT NULL
+          AND trinucleotide != ''
+        GROUP BY trinucleotide
+        """,
+        parameters={"sid": session_id},
+    )
+
+    rows = result.result_rows
+
+    if not rows:
+        return BarChartResponse(categories=[], data=[[]], mode=mode)
+
+    categories = [row[0] for row in rows]
+    counts = [row[1] for row in rows]
+
+    if mode == "frequency":
+        total = sum(counts)
+        values = [round((c / total) * 100, 2) for c in counts]
+    else:
+        values = [float(c) for c in counts]
+
+    # Sort by value descending
+    sorted_pairs = sorted(zip(categories, values), key=lambda x: x[1], reverse=True)
+    categories, values = map(list, zip(*sorted_pairs))
+
+    return BarChartResponse(categories=categories, data=[values], mode=mode)
+
+
+@api_router.get("/{session_id}/snv-change", response_model=BarChartResponse)
+def GET_SNV_CHANGE_BARCHART(
+    session_id: str,
+    mode: Literal["count", "frequency"] = "frequency",
+    db: clickhouse_connect.driver.Client = Depends(get_db),
+):
+    result = db.query(
+        """
+        SELECT
+            concat(ref, '>', alt) AS snv_change,
+            count()               AS cnt
+        FROM nc_spark.user_results
+        WHERE session_id = {sid:String}
+          AND ref IS NOT NULL AND ref != ''
+          AND alt IS NOT NULL AND alt != ''
+          AND length(ref) = 1
+          AND length(alt) = 1
+        GROUP BY snv_change
+        """,
+        parameters={"sid": session_id},
+    )
+
+    rows = result.result_rows
+
+    if not rows:
+        return BarChartResponse(categories=[], data=[[]], mode=mode)
+
+    categories = [row[0] for row in rows]
+    counts = [row[1] for row in rows]
+
+    if mode == "frequency":
+        total = sum(counts)
+        values = [round(c / total, 4) for c in counts]
+    else:
+        values = [float(c) for c in counts]
+
+    sorted_pairs = sorted(zip(categories, values), key=lambda x: x[1], reverse=True)
+    categories, values = map(list, zip(*sorted_pairs))
+
+    return BarChartResponse(categories=categories, data=[values], mode=mode)
 
 
 @api_router.get("/{session_id}/replication", response_model=ReplicationRadarResponse)
