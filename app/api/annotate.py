@@ -138,7 +138,7 @@ def materialise_annotations(session_id: str, variant_count: int):
         query = f"""
             INSERT INTO nc_spark.user_results
                 (session_id, chr, pos, ref, alt,
-                CADD, CSCAPE_NONCODING, DANN,FATHMM_MKL_NONCODING,FATHMM_XF_NONCODING,
+                CADD, CSCAPE_NONCODING, DANN, FATHMM_MKL_NONCODING, FATHMM_XF_NONCODING,
                 GPN, GWRVIS, JARVIS, LINSIGHT, NCER, ORION, REMM,
                 GERP, PhyloP_100way, PhyloP_30way, MACIE_CONSERVED,
                 FUNSEQ2, FIRE, REGULOMEDB, MACIE_REGULATORY,
@@ -159,7 +159,7 @@ def materialise_annotations(session_id: str, variant_count: int):
             SELECT
                 {{sid:String}} AS session_id,
                 s.chr, s.pos, s.ref, s.alt,
-                s.CADD, s.CSCAPE_NONCODING, s.DANN,s.FATHMM_MKL_NONCODING,s.FATHMM_XF_NONCODING,
+                s.CADD, s.CSCAPE_NONCODING, s.DANN, s.FATHMM_MKL_NONCODING, s.FATHMM_XF_NONCODING,
                 s.GPN, s.GWRVIS, s.JARVIS, s.LINSIGHT, s.NCER, s.ORION, s.REMM,
                 s.GERP, s.PhyloP_100way, s.PhyloP_30way, s.MACIE_CONSERVED,
                 s.FUNSEQ2, s.FIRE, s.REGULOMEDB, s.MACIE_REGULATORY,
@@ -169,19 +169,24 @@ def materialise_annotations(session_id: str, variant_count: int):
                 s.conservation_mean,  s.conservation_median,  s.conservation_min,  s.conservation_max,
                 s.replication_timing_mean, s.replication_timing_median, s.replication_timing_min, s.replication_timing_max,
                 s.trinucleotide,
-                COALESCE(g.gene_if_overlapping, '')  AS gene_if_overlapping,
-                COALESCE(g.nearest_gene_plus,   '')  AS nearest_gene_plus,
-                g.plus_distance                      AS plus_distance,
-                COALESCE(g.nearest_gene_minus,  '')  AS nearest_gene_minus,
-                g.minus_distance                     AS minus_distance
+                COALESCE(g.gene_if_overlapping, '') AS gene_if_overlapping,
+                COALESCE(g.nearest_gene_plus,   '') AS nearest_gene_plus,
+                g.plus_distance                     AS plus_distance,
+                COALESCE(g.nearest_gene_minus,  '') AS nearest_gene_minus,
+                g.minus_distance                    AS minus_distance
             FROM {scores_table} s
             LEFT JOIN {gene_table} g
                 ON s.chr = g.chr AND s.pos = g.pos
-            PREWHERE s.pos IN (SELECT DISTINCT pos FROM uploaded)
+            PREWHERE s.chr IN (SELECT DISTINCT chr FROM uploaded)
+                AND s.pos IN (SELECT DISTINCT pos FROM uploaded)
             WHERE (s.chr, s.pos, s.ref, s.alt) IN (SELECT chr, pos, ref, alt FROM uploaded)
             SETTINGS
-                join_algorithm = 'hash'
+                max_threads = 96,
+                max_streams_for_merge_tree_reading = 96,
+                join_algorithm = 'parallel_hash,grace_hash'
+
             """
+
         print(scores_table, gene_table, query)
 
         session.command(
