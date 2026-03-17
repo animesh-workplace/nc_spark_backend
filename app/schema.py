@@ -157,3 +157,28 @@ class TiTvResponse(BaseModel):
     ti_count: int
     tv_count: int
     titv_ratio: float
+
+
+class VariantScoreRow(BaseModel):
+    variant: str
+    group_score: float
+
+
+class GroupTopVariants(BaseModel):
+    group: str
+    rank_by: str
+    rank_col: str
+    top: List[VariantScoreRow]
+
+
+class CrossGroupVariant(BaseModel):
+    variant: str
+    appears_in: List[str]  # list of group names
+    group_count: int  # how many groups it appears in
+
+
+class TopVariantsResponse(BaseModel):
+    results: Dict[str, GroupTopVariants]
+    cross_group_hits: List[
+        CrossGroupVariant
+    ]  # variants in 2+ groups, sorted by group_count desc
