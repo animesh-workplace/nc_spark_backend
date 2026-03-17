@@ -19,6 +19,8 @@ from app.schema import (
     BarChartResponse,
     ScoreDistribution,
     ReplicationRadarResponse,
+    BoxplotStats,
+    TiTvResponse,
 )
 
 api_router = APIRouter()
@@ -49,6 +51,138 @@ def GET_STATUS(session_id: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     return session.to_dict()
+
+
+def compute_boxplot_stats(values: List[float]) -> BoxplotStats:
+    s = sorted(values)
+
+    def percentile(data, pct):
+        idx = (len(data) - 1) * pct / 100
+        lo, hi = int(idx), min(int(idx) + 1, len(data) - 1)
+        return round(data[lo] + (data[hi] - data[lo]) * (idx - lo), 4)
+
+    return BoxplotStats(
+        min=round(s[0], 4),
+        q1=percentile(s, 25),
+        median=percentile(s, 50),
+        q3=percentile(s, 75),
+        max=round(s[-1], 4),
+    )
+
+
+TRANSITIONS = {"A>G", "G>A", "C>T", "T>C"}
+TRANSVERSIONS = {"A>C", "C>A", "A>T", "T>A", "G>C", "C>G", "G>T", "T>G"}
+
+
+@api_router.get("/{session_id}/titv", response_model=TiTvResponse)
+def GET_TITV(
+    session_id: str,
+    mode: Literal["count", "frequency", "boxplot"] = "count",
+    db: clickhouse_connect.driver.Client = Depends(get_db),
+):
+    # Base query — for boxplot fetch a numeric score to distribute,
+    # for count/frequency we just need the SNV change + count
+    if mode == "boxplot":
+        result = db.query(
+            """
+            SELECT
+                concat(ref, '>', alt)       AS snv_change,
+                CADD                         AS score
+            FROM nc_spark.user_results
+            WHERE session_id = {sid:String}
+              AND ref  IS NOT NULL AND ref  != ''
+              AND alt  IS NOT NULL AND alt  != ''
+              AND length(ref) = 1
+              AND length(alt) = 1
+              AND CADD IS NOT NULL
+            """,
+            parameters={"sid": session_id},
+        )
+        rows = result.result_rows
+
+        ti_scores, tv_scores = [], []
+        for snv_change, score in rows:
+            if snv_change in TRANSITIONS:
+                ti_scores.append(score)
+            elif snv_change in TRANSVERSIONS:
+                tv_scores.append(score)
+
+        ti_count = len(ti_scores)
+        tv_count = len(tv_scores)
+        titv_ratio = round(ti_count / tv_count, 4) if tv_count > 0 else 0.0
+
+        boxplot = {}
+        if ti_scores:
+            boxplot["Ti"] = compute_boxplot_stats(ti_scores)
+        if tv_scores:
+            boxplot["Tv"] = compute_boxplot_stats(tv_scores)
+
+        return TiTvResponse(
+            categories=["Ti", "Tv"],
+            data=[[]],
+            boxplot=boxplot,
+            mode=mode,
+            ti_count=ti_count,
+            tv_count=tv_count,
+            titv_ratio=titv_ratio,
+        )
+
+    # count / frequency mode — same as before
+    result = db.query(
+        """
+        SELECT
+            concat(ref, '>', alt) AS snv_change,
+            count()               AS cnt
+        FROM nc_spark.user_results
+        WHERE session_id = {sid:String}
+          AND ref  IS NOT NULL AND ref  != ''
+          AND alt  IS NOT NULL AND alt  != ''
+          AND length(ref) = 1
+          AND length(alt) = 1
+        GROUP BY snv_change
+        """,
+        parameters={"sid": session_id},
+    )
+    rows = result.result_rows
+
+    if not rows:
+        return TiTvResponse(
+            categories=["Ti", "Tv"],
+            data=[[0.0, 0.0]],
+            boxplot=None,
+            mode=mode,
+            ti_count=0,
+            tv_count=0,
+            titv_ratio=0.0,
+        )
+
+    ti_count, tv_count = 0, 0
+    for snv_change, cnt in rows:
+        if snv_change in TRANSITIONS:
+            ti_count += cnt
+        elif snv_change in TRANSVERSIONS:
+            tv_count += cnt
+
+    total = ti_count + tv_count
+    titv_ratio = round(ti_count / tv_count, 4) if tv_count > 0 else 0.0
+
+    if mode == "frequency":
+        values = [
+            round(ti_count / total, 4) if total > 0 else 0.0,
+            round(tv_count / total, 4) if total > 0 else 0.0,
+        ]
+    else:
+        values = [float(ti_count), float(tv_count)]
+
+    return TiTvResponse(
+        categories=["Ti", "Tv"],
+        data=[values],
+        boxplot=None,
+        mode=mode,
+        ti_count=ti_count,
+        tv_count=tv_count,
+        titv_ratio=titv_ratio,
+    )
 
 
 @api_router.get(
