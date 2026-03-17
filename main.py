@@ -2,6 +2,7 @@ import math
 import clickhouse_connect
 from app.session import get_db
 from typing import List, Literal
+from collections import defaultdict
 from fastapi import BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, Depends, APIRouter, HTTPException
@@ -9,18 +10,22 @@ from app.api.annotate import get_filtered_variants, upload_variants, get_session
 from app.schema import (
     ALL_SCORES,
     VariantInput,
+    BoxplotStats,
+    TiTvResponse,
     FilterRequest,
     UploadResponse,
     FilterResponse,
     StatusResponse,
     RadarDataPoint,
     DistributionBin,
+    VariantScoreRow,
     ReplicationStats,
     BarChartResponse,
+    GroupTopVariants,
     ScoreDistribution,
+    CrossGroupVariant,
+    TopVariantsResponse,
     ReplicationRadarResponse,
-    BoxplotStats,
-    TiTvResponse,
 )
 
 api_router = APIRouter()
@@ -72,6 +77,103 @@ def compute_boxplot_stats(values: List[float]) -> BoxplotStats:
 
 TRANSITIONS = {"A>G", "G>A", "C>T", "T>C"}
 TRANSVERSIONS = {"A>C", "C>A", "A>T", "T>A", "G>C", "C>G", "G>T", "T>G"}
+SCORE_GROUPS = {
+    "pathogenicity": [
+        "CADD",
+        "CSCAPE_NONCODING",
+        "DANN",
+        "FATHMM_MKL_NONCODING",
+        "FATHMM_XF_NONCODING",
+        "GPN",
+        "GWRVIS",
+        "JARVIS",
+        "LINSIGHT",
+        "NCER",
+        "ORION",
+        "REMM",
+    ],
+    "regulatory": ["FUNSEQ2", "FIRE", "REGULOMEDB", "MACIE_REGULATORY"],
+    "conservation": ["GERP", "PhyloP_100way", "PhyloP_30way", "MACIE_CONSERVED"],
+    "replication_timing": [
+        "REPLISEQ_S1",
+        "REPLISEQ_S2",
+        "REPLISEQ_S3",
+        "REPLISEQ_S4",
+        "REPLISEQ_G1B",
+        "REPLISEQ_G2",
+    ],
+}
+
+# Maps group key → actual column prefix in the DB
+GROUP_STAT_NAMES = {
+    "pathogenicity": "pathogenicity",
+    "regulatory": "regulatory",
+    "conservation": "conservation",
+    "replication_timing": "replication_timing",
+}
+
+
+@api_router.get("/{session_id}/top-variants", response_model=TopVariantsResponse)
+def GET_TOP_VARIANTS(
+    session_id: str,
+    rank_by: Literal["mean", "median", "min", "max"] = "mean",
+    limit: int = 10,
+    db: clickhouse_connect.driver.Client = Depends(get_db),
+):
+    results = {}
+    variant_group_map = defaultdict(list)  # variant → [group names it appears in]
+
+    for group in SCORE_GROUPS:
+        rank_col = f"{GROUP_STAT_NAMES[group]}_{rank_by}"
+
+        query = f"""
+            SELECT
+                concat(chr, ':', toString(pos), ':', ref, '>', alt) AS variant,
+                round({rank_col}, 4) AS group_score
+            FROM nc_spark.user_results
+            WHERE session_id = {{sid:String}}
+              AND {rank_col} IS NOT NULL
+            ORDER BY {rank_col} DESC
+            LIMIT {{lim:UInt32}}
+        """
+
+        result = db.query(
+            query,
+            parameters={"sid": session_id, "lim": limit},
+        )
+
+        top_rows = [
+            VariantScoreRow(variant=row[0], group_score=row[1])
+            for row in result.result_rows
+        ]
+
+        # Track which groups each variant appears in
+        for row in top_rows:
+            variant_group_map[row.variant].append(group)
+
+        results[group] = GroupTopVariants(
+            group=group,
+            rank_by=rank_by,
+            rank_col=rank_col,
+            top=top_rows,
+        )
+
+    # Build cross-group hits — only variants appearing in 2+ groups
+    cross_group_hits = sorted(
+        [
+            CrossGroupVariant(
+                variant=variant,
+                appears_in=groups,
+                group_count=len(groups),
+            )
+            for variant, groups in variant_group_map.items()
+            if len(groups) >= 2
+        ],
+        key=lambda x: x.group_count,
+        reverse=True,
+    )
+
+    return TopVariantsResponse(results=results, cross_group_hits=cross_group_hits)
 
 
 @api_router.get("/{session_id}/titv", response_model=TiTvResponse)
@@ -168,8 +270,8 @@ def GET_TITV(
 
     if mode == "frequency":
         values = [
-            round(ti_count / total, 4) if total > 0 else 0.0,
-            round(tv_count / total, 4) if total > 0 else 0.0,
+            round((ti_count / total) * 100, 2) if total > 0 else 0.0,
+            round((tv_count / total) * 100, 2) if total > 0 else 0.0,
         ]
     else:
         values = [float(ti_count), float(tv_count)]
@@ -219,7 +321,7 @@ def GET_VARIANTS_PER_CHROMOSOME(
 
     if mode == "frequency":
         total = sum(counts)
-        values = [round(c / total, 4) for c in counts]
+        values = [round((c / total) * 100, 2) for c in counts]
     else:
         values = [float(c) for c in counts]
 
@@ -232,7 +334,7 @@ def GET_VARIANTS_PER_CHROMOSOME(
         except ValueError:
             return 99  # unknown contigs go last
 
-    sorted_pairs = sorted(zip(categories, values), key=chrom_sort_key)
+    sorted_pairs = sorted(zip(categories, values), key=lambda x: x[1], reverse=True)
     categories, values = map(list, zip(*sorted_pairs))
 
     return BarChartResponse(categories=categories, data=[values], mode=mode)
@@ -289,7 +391,7 @@ def GET_SNV_CHANGE_BARCHART(
         """
         SELECT
             concat(ref, '>', alt) AS snv_change,
-            count()               AS cnt
+            count() AS cnt
         FROM nc_spark.user_results
         WHERE session_id = {sid:String}
           AND ref IS NOT NULL AND ref != ''
@@ -311,7 +413,7 @@ def GET_SNV_CHANGE_BARCHART(
 
     if mode == "frequency":
         total = sum(counts)
-        values = [round(c / total, 4) for c in counts]
+        values = [round((c / total) * 100, 2) for c in counts]
     else:
         values = [float(c) for c in counts]
 
