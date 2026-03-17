@@ -139,3 +139,21 @@ class BarChartResponse(BaseModel):
     categories: List[str]
     data: List[List[float]]
     mode: Literal["count", "frequency"]
+
+
+class BoxplotStats(BaseModel):
+    min: float
+    q1: float
+    median: float
+    q3: float
+    max: float
+
+
+class TiTvResponse(BaseModel):
+    categories: List[str]
+    data: List[List[float]]  # used for count/frequency modes
+    boxplot: Optional[Dict[str, BoxplotStats]]  # used for boxplot mode, None otherwise
+    mode: Literal["count", "frequency", "boxplot"]
+    ti_count: int
+    tv_count: int
+    titv_ratio: float
