@@ -1,7 +1,7 @@
 from enum import Enum
 from datetime import datetime
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Literal
 
 
 class SortOrder(str, Enum):
@@ -133,3 +133,9 @@ REPLICATION_SCORES = [
 ALL_SCORES = (
     PATHOGENICITY_SCORES + CONSERVATION_SCORES + REGULATORY_SCORES + REPLICATION_SCORES
 )
+
+
+class BarChartResponse(BaseModel):
+    categories: List[str]
+    data: List[List[float]]
+    mode: Literal["count", "frequency"]
