@@ -1,92 +1,162 @@
+import queue
 import urllib3
+import threading
 import clickhouse_connect
-from functools import lru_cache
 from sqlalchemy import create_engine
+from contextlib import contextmanager
 from sqlalchemy.orm import registry, sessionmaker
 
-# --- Configuration ---
-CLICKHOUSE_PORT = 80
-CLICKHOUSE_PASSWORD = ""
-CLICKHOUSE_DB = "nc_spark"
-CLICKHOUSE_USER = "default"
-CLICKHOUSE_HOST = "10.10.9.24"
+# Configuration
+REMOTE_CLICKHOUSE_PORT = 80
+REMOTE_CLICKHOUSE_PASSWORD = ""
+REMOTE_CLICKHOUSE_DB = "nc_spark"
+REMOTE_CLICKHOUSE_USER = "default"
+REMOTE_CLICKHOUSE_HOST = "10.10.9.24"
+REMOTE_CLICKHOUSE_PROXY = "clickhouse/"
+
+LOCAL_CLICKHOUSE_PROXY = ""
+LOCAL_CLICKHOUSE_PORT = 8123
+LOCAL_CLICKHOUSE_PASSWORD = ""
+LOCAL_CLICKHOUSE_DB = "nc_spark"
+LOCAL_CLICKHOUSE_USER = "default"
+LOCAL_CLICKHOUSE_HOST = "0.0.0.0"
+
 SQLALCHEMY_DATABASE_URL = "sqlite:///database/database.sqlite3"
 
+# SQLAlchemy
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL,
     connect_args={"check_same_thread": False}
     if "sqlite" in SQLALCHEMY_DATABASE_URL
     else {},
 )
-
-try:
-    _client = clickhouse_connect.get_client(
-        interface="http",
-        host=CLICKHOUSE_HOST,
-        port=CLICKHOUSE_PORT,
-        user=CLICKHOUSE_USER,
-        database=CLICKHOUSE_DB,
-        proxy_path="clickhouse/",
-        password=CLICKHOUSE_PASSWORD,
-    )
-    _client.ping()
-except Exception as e:
-    print(f"FATAL: Could not connect to ClickHouse. {e}")
-    _client = None
-
-
-@lru_cache(maxsize=1)
-def get_clickhouse_client_cached():
-    """
-    Returns the globally shared ClickHouse client.
-    Using @lru_cache ensures this function effectively
-    returns the same _client instance every time.
-    """
-    if _client is None:
-        raise Exception("Database client is not initialized.")
-    return _client
-
-
-def get_db():
-    """
-    FastAPI Dependency to get the ClickHouse client.
-    """
-    client = get_clickhouse_client_cached()
-    try:
-        yield client
-    finally:
-        # We do NOT client.close() here.
-        # The client lives for the life of the app.
-        pass
-
-
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 mapper_registry = registry()
 Base = mapper_registry.generate_base()
 
 
-# ── Fresh client for background tasks ─────────
-def get_background_client():
+# Connection Pool
+class ClickHousePool:
     """
-    Always creates a new client instance.
-    Background tasks must NEVER share a client with request-scoped queries.
+    Thread-safe pool of clickhouse-connect clients.
+    Each borrowed client has its own session_id — no concurrent session errors.
     """
-    background_pool = urllib3.PoolManager(
+
+    def __init__(self, host, port, user, password, db, proxy, pool_size=10):
+        self._config = dict(
+            host=host,
+            port=port,
+            user=user,
+            database=db,
+            proxy_path=proxy,
+            password=password,
+        )
+        self._pool_size = pool_size
+        self._pool = queue.Queue(maxsize=pool_size)
+        self._lock = threading.Lock()
+
+        # Pre-fill the pool
+        for _ in range(pool_size):
+            self._pool.put(self._make_client())
+
+        print(f"✓ ClickHouse pool ready: {host}:{port} ({pool_size} clients)")
+
+    def _make_client(self):
+        return clickhouse_connect.get_client(
+            interface="http",
+            autogenerate_session_id=True,  # each client gets its own unique session_id
+            **self._config,
+        )
+
+    @contextmanager
+    def borrow(self, timeout: float = 10.0):
+        """
+        Borrow a client from the pool.
+        Returns it automatically when the with-block exits — even on exception.
+
+        Usage:
+            with pool.borrow() as client:
+                client.query(...)
+        """
+        try:
+            client = self._pool.get(timeout=timeout)
+        except queue.Empty:
+            raise Exception(
+                f"ClickHouse pool exhausted after {timeout}s. "
+                f"All {self._pool_size} clients are in use. Consider increasing pool_size."
+            )
+        try:
+            yield client
+        except Exception:
+            # If the client errored, replace it with a fresh one instead of returning the broken one
+            try:
+                client.close()
+            except Exception:
+                pass
+            client = self._make_client()
+            raise
+        finally:
+            self._pool.put(client)
+
+
+# Pool instances (created once at startup)
+local_pool = ClickHousePool(
+    pool_size=10,
+    db=LOCAL_CLICKHOUSE_DB,
+    host=LOCAL_CLICKHOUSE_HOST,
+    port=LOCAL_CLICKHOUSE_PORT,
+    user=LOCAL_CLICKHOUSE_USER,
+    proxy=LOCAL_CLICKHOUSE_PROXY,
+    password=LOCAL_CLICKHOUSE_PASSWORD,
+)
+
+remote_pool = ClickHousePool(
+    pool_size=10,
+    db=REMOTE_CLICKHOUSE_DB,
+    host=REMOTE_CLICKHOUSE_HOST,
+    port=REMOTE_CLICKHOUSE_PORT,
+    user=REMOTE_CLICKHOUSE_USER,
+    proxy=REMOTE_CLICKHOUSE_PROXY,
+    password=REMOTE_CLICKHOUSE_PASSWORD,
+)
+
+
+# FastAPI Dependencies
+def get_local_db():
+    """
+    FastAPI dependency — borrows a client from the local pool for the
+    duration of the request, then returns it automatically.
+    """
+    with local_pool.borrow() as client:
+        yield client
+
+
+def get_remote_db():
+    """
+    FastAPI dependency — borrows a client from the remote pool for the
+    duration of the request, then returns it automatically.
+    """
+    with remote_pool.borrow() as client:
+        yield client
+
+
+# Background task clients
+def _make_background_client(host, port, user, password, db, proxy):
+    pool = urllib3.PoolManager(
         num_pools=1,
         maxsize=2,
-        headers={"Connection": "close"},  # disable keep-alive for background client
+        headers={"Connection": "close"},
     )
-
     return clickhouse_connect.get_client(
+        host=host,
+        port=port,
+        user=user,
+        database=db,
+        pool_mgr=pool,
         interface="http",
-        host=CLICKHOUSE_HOST,
-        port=CLICKHOUSE_PORT,
-        user=CLICKHOUSE_USER,
-        database=CLICKHOUSE_DB,
-        proxy_path="clickhouse/",
-        pool_mgr=background_pool,
+        proxy_path=proxy,
+        password=password,
         send_receive_timeout=1860,
-        password=CLICKHOUSE_PASSWORD,
         autogenerate_session_id=False,
         settings={
             "priority": 10,
@@ -105,4 +175,26 @@ def get_background_client():
             "min_insert_block_size_bytes": 268435456,
             "max_bytes_before_external_sort": 214748364800,
         },
+    )
+
+
+def get_local_background_client():
+    return _make_background_client(
+        LOCAL_CLICKHOUSE_HOST,
+        LOCAL_CLICKHOUSE_PORT,
+        LOCAL_CLICKHOUSE_USER,
+        LOCAL_CLICKHOUSE_PASSWORD,
+        LOCAL_CLICKHOUSE_DB,
+        LOCAL_CLICKHOUSE_PROXY,
+    )
+
+
+def get_remote_background_client():
+    return _make_background_client(
+        REMOTE_CLICKHOUSE_HOST,
+        REMOTE_CLICKHOUSE_PORT,
+        REMOTE_CLICKHOUSE_USER,
+        REMOTE_CLICKHOUSE_PASSWORD,
+        REMOTE_CLICKHOUSE_DB,
+        REMOTE_CLICKHOUSE_PROXY,
     )
