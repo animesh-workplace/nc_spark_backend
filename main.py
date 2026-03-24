@@ -1,15 +1,15 @@
 import math
 import clickhouse_connect
-from app.session import get_db
 from typing import List, Literal
 from collections import defaultdict
-from fastapi import BackgroundTasks
+from app.api.upload import upload_variants2
+from app.api.job_status import get_job_status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, Depends, APIRouter, HTTPException
-from app.api.annotate import get_filtered_variants, upload_variants, get_session_status
+from app.api.annotate import get_filtered_variants
+from app.session import get_remote_db, get_local_db
+from fastapi import FastAPI, Depends, APIRouter, HTTPException, File, Form, UploadFile
 from app.schema import (
     ALL_SCORES,
-    VariantInput,
     BoxplotStats,
     TiTvResponse,
     FilterRequest,
@@ -32,30 +32,48 @@ api_router = APIRouter()
 BASE_URL = "/nvpp/api/v1"
 
 
-@api_router.post("/upload_variants", response_model=UploadResponse)
-def UPLOAD_VARIANTS(
-    variants: List[VariantInput],
-    background_tasks: BackgroundTasks,
-    genome: str = "hg19",
-    session: clickhouse_connect.driver.Client = Depends(get_db),
+@api_router.post("/upload", response_model=UploadResponse)
+def upload_endpoint(
+    file: UploadFile = File(...),
+    genome: str = Form(...),
+    file_format: Literal["csv", "tsv"] = Form(...),
+    session: clickhouse_connect.driver.Client = Depends(get_local_db),
 ):
-    return upload_variants(variants, genome, session, background_tasks)
+    return upload_variants2(
+        file=file,
+        genome=genome,
+        session=session,
+        file_format=file_format,
+    )
+
+
+@api_router.get("/status/{session_id}", response_model=StatusResponse)
+def GET_STATUS(session_id: str):
+    session = get_job_status(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return session.to_dict()
 
 
 @api_router.post("/get_filtered_variants", response_model=FilterResponse)
 def GET_FILTERED_VARIANTS(
     request: FilterRequest,
-    session: clickhouse_connect.driver.Client = Depends(get_db),
+    session: clickhouse_connect.driver.Client = Depends(get_local_db),
 ):
     return get_filtered_variants(request, session)
 
 
-@api_router.get("/status/{session_id}", response_model=StatusResponse)
-def GET_STATUS(session_id: str):
-    session = get_session_status(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-    return session.to_dict()
+#############################################################################
+
+
+# @api_router.post("/upload_variants", response_model=UploadResponse)
+# def UPLOAD_VARIANTS(
+#     variants: List[VariantInput],
+#     background_tasks: BackgroundTasks,
+#     genome: str = "hg19",
+#     session: clickhouse_connect.driver.Client = Depends(get_remote_db),
+# ):
+#     return upload_variants(variants, genome, session, background_tasks)
 
 
 def compute_boxplot_stats(values: List[float]) -> BoxplotStats:
@@ -118,7 +136,7 @@ def GET_TOP_VARIANTS(
     session_id: str,
     rank_by: Literal["mean", "median", "min", "max"] = "mean",
     limit: int = 10,
-    db: clickhouse_connect.driver.Client = Depends(get_db),
+    db: clickhouse_connect.driver.Client = Depends(get_remote_db),
 ):
     results = {}
     variant_group_map = defaultdict(list)  # variant → [group names it appears in]
@@ -180,7 +198,7 @@ def GET_TOP_VARIANTS(
 def GET_TITV(
     session_id: str,
     mode: Literal["count", "frequency", "boxplot"] = "count",
-    db: clickhouse_connect.driver.Client = Depends(get_db),
+    db: clickhouse_connect.driver.Client = Depends(get_remote_db),
 ):
     # Base query — for boxplot fetch a numeric score to distribute,
     # for count/frequency we just need the SNV change + count
@@ -188,12 +206,12 @@ def GET_TITV(
         result = db.query(
             """
             SELECT
-                concat(ref, '>', alt)       AS snv_change,
-                CADD                         AS score
+                concat(ref, '>', alt) AS snv_change,
+                CADD AS score
             FROM nc_spark.user_results
             WHERE session_id = {sid:String}
-              AND ref  IS NOT NULL AND ref  != ''
-              AND alt  IS NOT NULL AND alt  != ''
+              AND ref IS NOT NULL AND ref  != ''
+              AND alt IS NOT NULL AND alt  != ''
               AND length(ref) = 1
               AND length(alt) = 1
               AND CADD IS NOT NULL
@@ -234,11 +252,11 @@ def GET_TITV(
         """
         SELECT
             concat(ref, '>', alt) AS snv_change,
-            count()               AS cnt
+            count() AS cnt
         FROM nc_spark.user_results
         WHERE session_id = {sid:String}
-          AND ref  IS NOT NULL AND ref  != ''
-          AND alt  IS NOT NULL AND alt  != ''
+          AND ref IS NOT NULL AND ref  != ''
+          AND alt IS NOT NULL AND alt  != ''
           AND length(ref) = 1
           AND length(alt) = 1
         GROUP BY snv_change
@@ -295,7 +313,7 @@ def GET_VARIANTS_PER_CHROMOSOME(
     mode: Literal[
         "count", "frequency"
     ] = "count",  # count makes more sense as default here
-    db: clickhouse_connect.driver.Client = Depends(get_db),
+    db: clickhouse_connect.driver.Client = Depends(get_remote_db),
 ):
     result = db.query(
         """
@@ -344,7 +362,7 @@ def GET_VARIANTS_PER_CHROMOSOME(
 def GET_TRINUCLEOTIDE_BARCHART(
     session_id: str,
     mode: Literal["count", "frequency"] = "frequency",
-    db: clickhouse_connect.driver.Client = Depends(get_db),
+    db: clickhouse_connect.driver.Client = Depends(get_remote_db),
 ):
     result = db.query(
         """
@@ -385,7 +403,7 @@ def GET_TRINUCLEOTIDE_BARCHART(
 def GET_SNV_CHANGE_BARCHART(
     session_id: str,
     mode: Literal["count", "frequency"] = "frequency",
-    db: clickhouse_connect.driver.Client = Depends(get_db),
+    db: clickhouse_connect.driver.Client = Depends(get_remote_db),
 ):
     result = db.query(
         """
@@ -426,7 +444,7 @@ def GET_SNV_CHANGE_BARCHART(
 @api_router.get("/{session_id}/replication", response_model=ReplicationRadarResponse)
 def GET_REPLICATION_RADAR(
     session_id: str,
-    db: clickhouse_connect.driver.Client = Depends(get_db),
+    db: clickhouse_connect.driver.Client = Depends(get_remote_db),
 ):
     indicator = [
         {"name": "G1B"},
@@ -519,7 +537,7 @@ def GET_REPLICATION_RADAR(
 def GET_DISTRIBUTIONS(
     session_id: str,
     bins: int = 20,
-    db: clickhouse_connect.driver.Client = Depends(get_db),
+    db: clickhouse_connect.driver.Client = Depends(get_remote_db),
 ):
     bin_width = round(1.0 / bins, 6)  # fixed 0.05 for bins=20
 
