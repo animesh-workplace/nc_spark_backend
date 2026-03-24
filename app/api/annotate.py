@@ -1,10 +1,11 @@
 import time
 import uuid
 from fastapi import HTTPException
+from celery_app import celery_app
 from fastapi import BackgroundTasks
 from app.models import SessionStatus
 from datetime import datetime, timezone, timedelta
-from app.session import get_background_client, SessionLocal
+from app.session import get_remote_background_client, SessionLocal
 
 
 # utils.py
@@ -111,7 +112,8 @@ def set_session_status(
 
 
 # tasks.py
-def materialise_annotations(session_id: str, variant_count: int):
+@celery_app.task(bind=True)
+def materialise_annotations(self, session_id: str, variant_count: int):
     """
     Runs after the HTTP response is already sent.
     Uses a fresh client — NOT the request-scoped one which is already closed.
@@ -120,7 +122,7 @@ def materialise_annotations(session_id: str, variant_count: int):
     print(
         "Starting background task to materialise annotations for session:", session_id
     )
-    session = get_background_client()
+    session = get_remote_background_client()
 
     session_info = get_session_status(session_id)
 
@@ -184,7 +186,6 @@ def materialise_annotations(session_id: str, variant_count: int):
                 max_threads = 96,
                 max_streams_for_merge_tree_reading = 96,
                 join_algorithm = 'parallel_hash,grace_hash'
-
             """
 
         print(scores_table, gene_table, query)
@@ -203,7 +204,7 @@ def materialise_annotations(session_id: str, variant_count: int):
         )
 
     except Exception as e:
-        error_client = get_background_client()
+        error_client = get_remote_background_client()
         set_session_status(
             status="error",
             error_message=str(e),
@@ -257,7 +258,7 @@ def upload_variants(variants, genome, session, background_tasks: BackgroundTasks
         session_id=session_id,
         variant_count=len(rows_to_insert),
     )
-    background_tasks.add_task(materialise_annotations, session_id, len(rows_to_insert))
+    materialise_annotations.delay(session_id, len(rows_to_insert))
 
     return {
         "session_id": session_id,
