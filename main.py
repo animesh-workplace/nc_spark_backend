@@ -33,7 +33,7 @@ BASE_URL = "/nvpp/api/v1"
 
 
 @api_router.post("/upload", response_model=UploadResponse)
-def upload_endpoint(
+def UPLOAD_VARIANTS(
     file: UploadFile = File(...),
     genome: str = Form(...),
     file_format: Literal["csv", "tsv"] = Form(...),
@@ -136,7 +136,7 @@ def GET_TOP_VARIANTS(
     session_id: str,
     rank_by: Literal["mean", "median", "min", "max"] = "mean",
     limit: int = 10,
-    db: clickhouse_connect.driver.Client = Depends(get_remote_db),
+    db: clickhouse_connect.driver.Client = Depends(get_local_db),
 ):
     results = {}
     variant_group_map = defaultdict(list)  # variant → [group names it appears in]
@@ -198,7 +198,7 @@ def GET_TOP_VARIANTS(
 def GET_TITV(
     session_id: str,
     mode: Literal["count", "frequency", "boxplot"] = "count",
-    db: clickhouse_connect.driver.Client = Depends(get_remote_db),
+    db: clickhouse_connect.driver.Client = Depends(get_local_db),
 ):
     # Base query — for boxplot fetch a numeric score to distribute,
     # for count/frequency we just need the SNV change + count
@@ -313,7 +313,7 @@ def GET_VARIANTS_PER_CHROMOSOME(
     mode: Literal[
         "count", "frequency"
     ] = "count",  # count makes more sense as default here
-    db: clickhouse_connect.driver.Client = Depends(get_remote_db),
+    db: clickhouse_connect.driver.Client = Depends(get_local_db),
 ):
     result = db.query(
         """
@@ -362,7 +362,7 @@ def GET_VARIANTS_PER_CHROMOSOME(
 def GET_TRINUCLEOTIDE_BARCHART(
     session_id: str,
     mode: Literal["count", "frequency"] = "frequency",
-    db: clickhouse_connect.driver.Client = Depends(get_remote_db),
+    db: clickhouse_connect.driver.Client = Depends(get_local_db),
 ):
     result = db.query(
         """
@@ -403,7 +403,7 @@ def GET_TRINUCLEOTIDE_BARCHART(
 def GET_SNV_CHANGE_BARCHART(
     session_id: str,
     mode: Literal["count", "frequency"] = "frequency",
-    db: clickhouse_connect.driver.Client = Depends(get_remote_db),
+    db: clickhouse_connect.driver.Client = Depends(get_local_db),
 ):
     result = db.query(
         """
@@ -444,7 +444,7 @@ def GET_SNV_CHANGE_BARCHART(
 @api_router.get("/{session_id}/replication", response_model=ReplicationRadarResponse)
 def GET_REPLICATION_RADAR(
     session_id: str,
-    db: clickhouse_connect.driver.Client = Depends(get_remote_db),
+    db: clickhouse_connect.driver.Client = Depends(get_local_db),
 ):
     indicator = [
         {"name": "G1B"},
@@ -537,7 +537,7 @@ def GET_REPLICATION_RADAR(
 def GET_DISTRIBUTIONS(
     session_id: str,
     bins: int = 20,
-    db: clickhouse_connect.driver.Client = Depends(get_remote_db),
+    db: clickhouse_connect.driver.Client = Depends(get_local_db),
 ):
     bin_width = round(1.0 / bins, 6)  # fixed 0.05 for bins=20
 
