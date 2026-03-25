@@ -144,8 +144,9 @@ def get_remote_db():
 def _make_background_client(host, port, user, password, db, proxy):
     pool = urllib3.PoolManager(
         num_pools=1,
-        maxsize=2,
-        headers={"Connection": "close"},
+        maxsize=50,
+        block=True,
+        # headers={"Connection": "close"},
     )
     return clickhouse_connect.get_client(
         host=host,
