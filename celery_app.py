@@ -34,6 +34,7 @@ celery_app.conf.update(
         "app.api.aging",
         "app.api.annotate",
         "app.api.annotation",
+        "benchmark_small_query_parallel",
     ],
     beat_schedule_filename=BEAT_DB_PATH,
     beat_schedule={
