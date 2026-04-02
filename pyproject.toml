@@ -11,7 +11,10 @@ dependencies = [
     "fastapi[standard]>=0.121.1",
     "fireducks>=1.4.4",
     "flower>=2.0.1",
+    "gunicorn>=25.2.0",
+    "matplotlib>=3.10.8",
     "redis>=7.3.0",
+    "rich>=14.2.0",
     "sqlalchemy>=2.0.48",
     "uvicorn>=0.38.0",
 ]
