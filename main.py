@@ -2,11 +2,11 @@ import math
 import clickhouse_connect
 from typing import List, Literal
 from collections import defaultdict
+from app.session import get_local_db
 from app.api.upload import upload_variants2
 from app.api.job_status import get_job_status
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.annotate import get_filtered_variants
-from app.session import get_remote_db, get_local_db
 from fastapi import FastAPI, Depends, APIRouter, HTTPException, File, Form, UploadFile
 from app.schema import (
     ALL_SCORES,
