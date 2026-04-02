@@ -1,0 +1,33 @@
+[
+  {
+    "label": "c=8 n=32 v=500",
+    "n_tasks": 32,
+    "variant_count": 500,
+    "concurrency_hint": 8,
+    "wall_time": 0.566,
+    "throughput": 0.0,
+    "successes": 0,
+    "failures": 32,
+    "total_latency": {
+      "min": null,
+      "max": null,
+      "mean": null,
+      "p50": null,
+      "p95": null
+    },
+    "execution_time": {
+      "min": null,
+      "max": null,
+      "mean": null,
+      "p50": null,
+      "p95": null
+    },
+    "queue_latency": {
+      "min": null,
+      "max": null,
+      "mean": null,
+      "p50": null,
+      "p95": null
+    }
+  }
+]
