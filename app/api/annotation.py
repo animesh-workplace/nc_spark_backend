@@ -5,7 +5,7 @@ from app.api.job_status import get_job_status, create_or_update_job_status
 from app.session import get_remote_background_client, get_local_background_client
 
 
-SMALL_VARIANT_THRESHOLD = 1000
+SMALL_VARIANT_THRESHOLD = 50000
 REPLICATION_CHUNK_SIZE = 50_000
 LARGE_VARIANT_THRESHOLD = 200_000
 COLUMNS_SQL = ", ".join(USER_RESULTS_COLUMNS)
@@ -104,9 +104,9 @@ def _process_single_chunk(
         # _build_large_query uses {sid:String} — substitute chunk_session_id
         # so the CTE reads only this chunk's uploads, not the whole session
         query = _build_large_query(
-            session_id=chunk_session_id,  # remote writes results under chunk_session_id
-            scores_table=scores_table,
             gene_table=gene_table,
+            scores_table=scores_table,
+            session_id=chunk_session_id,  # remote writes results under chunk_session_id
         )
 
         remote_session.command(query, parameters={"sid": chunk_session_id})
@@ -159,6 +159,10 @@ def _build_small_query(
     in_clause = ",\n                ".join(
         f"('{chr_}', {pos}, '{ref}', '{alt}')" for chr_, pos, ref, alt in variants
     )
+    chr_pos_pairs = ",\n                ".join(
+        f"('{chr_}', {pos})"
+        for chr_, pos in dict.fromkeys((v[0], v[1]) for v in variants)
+    )
 
     return f"""
         INSERT INTO nc_spark.user_results
@@ -195,13 +199,20 @@ def _build_small_query(
             COALESCE(g.nearest_gene_minus,  '') AS nearest_gene_minus,
             g.minus_distance                    AS minus_distance
         FROM {scores_table} s
-        LEFT JOIN {gene_table} g
-            ON s.chr = g.chr AND s.pos = g.pos
+        LEFT ANY JOIN (
+            SELECT chr, pos, gene_if_overlapping, nearest_gene_plus,
+                   plus_distance, nearest_gene_minus, minus_distance
+            FROM {gene_table}
+            WHERE (chr, pos) IN (
+                {chr_pos_pairs}
+            )
+        ) g ON s.chr = g.chr AND s.pos = g.pos
         WHERE (s.chr, s.pos, s.ref, s.alt) IN (
                 {in_clause}
         )
         SETTINGS
-            optimize_move_to_prewhere = 1;
+            join_algorithm = 'parallel_hash',
+            join_use_nulls = 1
     """
 
 
@@ -255,10 +266,9 @@ def _build_large_query(
             COALESCE(g.nearest_gene_minus,  '') AS nearest_gene_minus,
             g.minus_distance                    AS minus_distance
         FROM {scores_table} s
-        LEFT JOIN {gene_table} g
+        LEFT ANY JOIN {gene_table} g
             ON s.chr = g.chr AND s.pos = g.pos
-        PREWHERE s.chr IN (SELECT DISTINCT chr FROM uploaded)
-            AND s.pos IN (SELECT DISTINCT pos FROM uploaded)
+        PREWHERE (s.chr, s.pos) IN (SELECT DISTINCT chr, pos FROM uploaded)
         WHERE (s.chr, s.pos, s.ref, s.alt) IN (SELECT chr, pos, ref, alt FROM uploaded)
         SETTINGS
             max_threads = 96,
