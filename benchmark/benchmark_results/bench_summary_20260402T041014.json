@@ -1,0 +1,33 @@
+[
+  {
+    "label": "c=10 n=50 v=500",
+    "n_tasks": 50,
+    "variant_count": 500,
+    "concurrency_hint": 10,
+    "wall_time": 2.169,
+    "throughput": 23.055,
+    "successes": 50,
+    "failures": 0,
+    "total_latency": {
+      "min": 0.56,
+      "max": 2.056,
+      "mean": 1.227,
+      "p50": 1.311,
+      "p95": 2.055
+    },
+    "execution_time": {
+      "min": 0.137,
+      "max": 0.846,
+      "mean": 0.544,
+      "p50": 0.537,
+      "p95": 0.803
+    },
+    "queue_latency": {
+      "min": 0.008,
+      "max": 1.433,
+      "mean": 0.684,
+      "p50": 0.761,
+      "p95": 1.429
+    }
+  }
+]
