@@ -1,7 +1,8 @@
 from typing import Optional
 from dataclasses import dataclass
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from app.session import get_local_background_client
+from app.session import get_local_db, get_local_background_client
 
 
 _STATUS_TIMESTAMP = {
@@ -62,12 +63,7 @@ class JobStatus:
 
 
 def get_job_status(session_id: str) -> JobStatus | None:
-    """
-    Fetches the latest version of a session using FINAL.
-    Returns None if not found.
-    """
-    client = get_local_background_client()
-    try:
+    with contextmanager(get_local_db)() as client:
         result = client.query(
             f"""
                 SELECT * FROM {TABLE} FINAL
@@ -80,8 +76,29 @@ def get_job_status(session_id: str) -> JobStatus | None:
 
         row = dict(zip(result.column_names, result.result_rows[0]))
         return _row_to_job_status(row)
-    finally:
-        client.close()
+
+
+# def get_job_status(session_id: str) -> JobStatus | None:
+#     """
+#     Fetches the latest version of a session using FINAL.
+#     Returns None if not found.
+#     """
+#     client = get_local_db()
+#     try:
+#         result = client.query(
+#             f"""
+#                 SELECT * FROM {TABLE} FINAL
+#                 WHERE session_id = {{sid:String}} LIMIT 1
+#             """,
+#             parameters={"sid": session_id},
+#         )
+#         if not result.result_rows:
+#             return None
+
+#         row = dict(zip(result.column_names, result.result_rows[0]))
+#         return _row_to_job_status(row)
+#     finally:
+#         client.close()
 
 
 def create_or_update_job_status(
@@ -109,10 +126,8 @@ def create_or_update_job_status(
       merges changed fields, and inserts the new version.
     ClickHouse ReplacingMergeTree keeps only the highest version per session_id.
     """
-    client = get_local_background_client()
-    now = datetime.now(timezone.utc)
-
-    try:
+    with contextmanager(get_local_db)() as client:
+        now = datetime.now(timezone.utc)
         existing = get_job_status(session_id)
 
         if existing is None:
@@ -161,9 +176,6 @@ def create_or_update_job_status(
 
         _insert_row(client, row)
         return row
-
-    finally:
-        client.close()
 
 
 # Internal helpers
