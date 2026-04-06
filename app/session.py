@@ -224,7 +224,7 @@ def _make_background_client(host, port, user, password, db, proxy, pool_mgr):
         proxy_path=proxy,
         password=password,
         send_receive_timeout=1860,
-        autogenerate_session_id=False,
+        autogenerate_session_id=True,
         settings={
             # ── Insert behaviour ──────────────────────────────────────────
             "async_insert": 1,  # server buffers batches → throughput
