@@ -22,12 +22,12 @@ celery_app = Celery(
 celery_app.conf.update(
     timezone="UTC",
     enable_utc=True,
-    result_expires=3600,
     task_acks_late=True,
     worker_concurrency=1,
     task_serializer="json",
     accept_content=["json"],
     result_serializer="json",
+    result_expires=3600 * 24,
     worker_prefetch_multiplier=1,
     task_reject_on_worker_lost=True,
     imports=[
