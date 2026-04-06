@@ -4,7 +4,7 @@ import shutil
 from pathlib import Path
 import fireducks.pandas as pd
 from fastapi import HTTPException, UploadFile
-from app.api.annotation import materialise_annotations
+from app.api.annotation import dispatch_annotation_job
 from app.api.job_status import create_or_update_job_status
 
 # from app.api.annotate import set_session_status,materialise_annotations
@@ -91,6 +91,7 @@ def upload_variants2(file: UploadFile, genome: str, file_format: str, session) -
         session_id=session_id,
         variant_count=variant_count,
         stored_file_path=str(dest_path),
+        queue_name="small" if variant_count <= 50_000 else "large",
     )
 
     # Step 8: Compute priority + dispatch
@@ -103,8 +104,8 @@ def upload_variants2(file: UploadFile, genome: str, file_format: str, session) -
     #     queue=queue,
     # )
 
-    result = materialise_annotations.apply_async(
-        args=[session_id, variant_count],
+    result = dispatch_annotation_job.apply_async(
+        args=[session_id, variant_count], queue="job_worker"
     )
 
     create_or_update_job_status(
