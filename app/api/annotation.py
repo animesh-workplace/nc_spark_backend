@@ -385,7 +385,7 @@ def materialise_annotations(session_id: str, variant_count: int):
 
         callback = finalise_annotations.s(
             session_id=session_id, job_start=job_start
-        ).set(queue="job_worker")
+        ).set(queue="finalise")
 
         result = chord(header)(callback)
 
