@@ -11,6 +11,7 @@ _STATUS_TIMESTAMP = {
     "complete": "completed_at",
     "error": "completed_at",
 }
+IST = timezone(timedelta(hours=5, minutes=30))
 
 TABLE = "nc_spark.session_status"
 
@@ -78,29 +79,6 @@ def get_job_status(session_id: str) -> JobStatus | None:
         return _row_to_job_status(row)
 
 
-# def get_job_status(session_id: str) -> JobStatus | None:
-#     """
-#     Fetches the latest version of a session using FINAL.
-#     Returns None if not found.
-#     """
-#     client = get_local_db()
-#     try:
-#         result = client.query(
-#             f"""
-#                 SELECT * FROM {TABLE} FINAL
-#                 WHERE session_id = {{sid:String}} LIMIT 1
-#             """,
-#             parameters={"sid": session_id},
-#         )
-#         if not result.result_rows:
-#             return None
-
-#         row = dict(zip(result.column_names, result.result_rows[0]))
-#         return _row_to_job_status(row)
-#     finally:
-#         client.close()
-
-
 def create_or_update_job_status(
     session_id: str,
     *,
@@ -118,6 +96,8 @@ def create_or_update_job_status(
     celery_task_id: str = None,
     annotated_count: int = None,
     current_priority: int = None,
+    completed_at: datetime = None,
+    started_at: datetime = None,
 ) -> JobStatus:
     """
     Upserts a session_status row.
@@ -127,8 +107,10 @@ def create_or_update_job_status(
     ClickHouse ReplacingMergeTree keeps only the highest version per session_id.
     """
     with contextmanager(get_local_db)() as client:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc).replace(microsecond=0)
         existing = get_job_status(session_id)
+
+        print("NOW date", now)
 
         if existing is None:
             # CREATE
@@ -173,7 +155,12 @@ def create_or_update_job_status(
                 row.stored_file_path = stored_file_path
             if from_cache:
                 row.from_cache = True
+            if completed_at is not None:
+                row.completed_at = completed_at
+            if started_at is not None:
+                row.started_at = started_at
 
+        print("Upserting job status:", row.to_dict())
         _insert_row(client, row)
         return row
 
@@ -198,11 +185,11 @@ def _insert_row(client, row: JobStatus):
                 row.queue_name,
                 row.current_priority,
                 row.stored_file_path,
-                row.created_at or datetime.now(timezone.utc),
+                row.created_at,
                 row.queued_at,
                 row.started_at,
                 row.completed_at,
-                row.expires_at or (datetime.now(timezone.utc) + timedelta(hours=24)),
+                row.expires_at,
             ]
         ],
         column_names=[
