@@ -145,7 +145,7 @@ def submit_jobs(client: httpx.Client, master_df: pd.DataFrame) -> list[dict]:
         5000000,
         10000000,
     ]
-    random.shuffle(file_counts)
+    # random.shuffle(file_counts)
 
     console.print(
         Panel(
