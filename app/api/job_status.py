@@ -98,6 +98,7 @@ def create_or_update_job_status(
     current_priority: int = None,
     completed_at: datetime = None,
     started_at: datetime = None,
+    queued_at: datetime = None,
 ) -> JobStatus:
     """
     Upserts a session_status row.
@@ -159,6 +160,8 @@ def create_or_update_job_status(
                 row.completed_at = completed_at
             if started_at is not None:
                 row.started_at = started_at
+            if queued_at is not None:
+                row.queued_at = queued_at
 
         print("Upserting job status:", row.to_dict())
         _insert_row(client, row)
