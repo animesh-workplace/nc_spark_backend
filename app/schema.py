@@ -219,6 +219,11 @@ class TiTvResponse(BaseModel):
 class VariantScoreRow(BaseModel):
     variant: str
     group_score: float
+    gene_if_overlapping: str = ""
+    nearest_gene_plus: str = ""
+    plus_distance: Optional[int] = None
+    nearest_gene_minus: str = ""
+    minus_distance: Optional[int] = None
 
 
 class GroupTopVariants(BaseModel):
@@ -230,12 +235,15 @@ class GroupTopVariants(BaseModel):
 
 class CrossGroupVariant(BaseModel):
     variant: str
-    appears_in: List[str]  # list of group names
-    group_count: int  # how many groups it appears in
+    appears_in: List[str]
+    group_count: int
+    gene_if_overlapping: str = ""
+    nearest_gene_plus: str = ""
+    plus_distance: Optional[int] = None
+    nearest_gene_minus: str = ""
+    minus_distance: Optional[int] = None
 
 
 class TopVariantsResponse(BaseModel):
     results: Dict[str, GroupTopVariants]
-    cross_group_hits: List[
-        CrossGroupVariant
-    ]  # variants in 2+ groups, sorted by group_count desc
+    cross_group_hits: List[CrossGroupVariant]
