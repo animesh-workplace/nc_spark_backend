@@ -140,6 +140,7 @@ def GET_TOP_VARIANTS(
 ):
     results = {}
     variant_group_map = defaultdict(list)  # variant → [group names it appears in]
+    variant_gene_map: dict = {}  # variant → gene annotation fields (first seen)
 
     for group in SCORE_GROUPS:
         rank_col = f"{GROUP_STAT_NAMES[group]}_{rank_by}"
@@ -147,7 +148,12 @@ def GET_TOP_VARIANTS(
         query = f"""
             SELECT
                 concat(chr, ':', toString(pos), ':', ref, '>', alt) AS variant,
-                round({rank_col}, 4) AS group_score
+                round({rank_col}, 4) AS group_score,
+                gene_if_overlapping,
+                nearest_gene_plus,
+                plus_distance,
+                nearest_gene_minus,
+                minus_distance
             FROM nc_spark.user_results
             WHERE session_id = {{sid:String}}
               AND {rank_col} IS NOT NULL
@@ -161,13 +167,30 @@ def GET_TOP_VARIANTS(
         )
 
         top_rows = [
-            VariantScoreRow(variant=row[0], group_score=row[1])
+            VariantScoreRow(
+                variant=row[0],
+                group_score=row[1],
+                gene_if_overlapping=row[2] or "",
+                nearest_gene_plus=row[3] or "",
+                plus_distance=row[4],
+                nearest_gene_minus=row[5] or "",
+                minus_distance=row[6],
+            )
             for row in result.result_rows
         ]
 
         # Track which groups each variant appears in
         for row in top_rows:
             variant_group_map[row.variant].append(group)
+            # Store gene annotation on first encounter
+            if row.variant not in variant_gene_map:
+                variant_gene_map[row.variant] = {
+                    "gene_if_overlapping": row.gene_if_overlapping,
+                    "nearest_gene_plus": row.nearest_gene_plus,
+                    "plus_distance": row.plus_distance,
+                    "nearest_gene_minus": row.nearest_gene_minus,
+                    "minus_distance": row.minus_distance,
+                }
 
         results[group] = GroupTopVariants(
             group=group,
@@ -183,6 +206,7 @@ def GET_TOP_VARIANTS(
                 variant=variant,
                 appears_in=groups,
                 group_count=len(groups),
+                **variant_gene_map.get(variant, {}),
             )
             for variant, groups in variant_group_map.items()
             if len(groups) >= 2
@@ -479,17 +503,23 @@ def GET_REPLICATION_RADAR(
     series_data = [
         RadarDataPoint(
             name=f"Row {i + 1}",
-            value=[round(v, 4) if v is not None else 0.0 for v in row],
+            value=[
+                round(v, 4) if (v is not None and math.isfinite(v)) else 0.0
+                for v in row
+            ],
         )
         for i, row in enumerate(rows)
     ]
 
+    def is_finite(x: float | None) -> bool:
+        return x is not None and math.isfinite(x)
+
     def safe_mean(vals):
-        clean = [v for v in vals if v is not None]
+        clean = [v for v in vals if is_finite(v)]
         return round(sum(clean) / len(clean), 4) if clean else 0.0
 
     def safe_median(vals):
-        s = sorted(v for v in vals if v is not None)
+        s = sorted(v for v in vals if is_finite(v))
         n = len(s)
         if not s:
             return 0.0
@@ -509,16 +539,26 @@ def GET_REPLICATION_RADAR(
     late_score = safe_mean(
         [means_by_name["S3"], means_by_name["S4"], means_by_name["G2"]]
     )
-    rt_score = (
-        round(math.log2(early_score / late_score), 4)
-        if late_score > 0 and early_score > 0
-        else 0.0
-    )
-    early_dom = (
-        round((early_score / (early_score + late_score)) * 100, 2)
-        if (early_score + late_score) > 0
-        else 0.0
-    )
+
+    def safe_log2_ratio(num: float, den: float) -> float:
+        if num <= 0 or den <= 0:
+            return 0.0
+        ratio = num / den
+        if not math.isfinite(ratio):
+            return 0.0
+        v = math.log2(ratio)
+        return round(v, 4) if math.isfinite(v) else 0.0
+
+    rt_score = safe_log2_ratio(early_score, late_score)
+
+    def safe_pct(num: float, den: float) -> float:
+        total = num + den
+        if total <= 0 or not math.isfinite(total):
+            return 0.0
+        v = (num / total) * 100
+        return round(v, 2) if math.isfinite(v) else 0.0
+
+    early_dom = safe_pct(early_score, late_score)
 
     stats = ReplicationStats(
         early_score=early_score,
