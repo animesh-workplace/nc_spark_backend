@@ -1,5 +1,6 @@
 import math
 import clickhouse_connect
+from itertools import product
 from typing import List, Literal
 from collections import defaultdict
 from app.session import get_local_db
@@ -30,6 +31,21 @@ from app.schema import (
 
 api_router = APIRouter()
 BASE_URL = "/nvpp/api/v1"
+
+
+def _all_96_trinucleotides() -> list[tuple[str, str, str, str]]:
+    """Returns (alt_trinucleotide, ref_trinucleotide, ref, alt)"""
+    bases = ["A", "C", "G", "T"]
+    sbs_subs = [("C", "A"), ("C", "G"), ("C", "T"), ("T", "A"), ("T", "C"), ("T", "G")]
+    return [
+        (f"{a}{alt}{c}", f"{a}{ref}{c}", ref, alt)
+        for ref, alt in sbs_subs
+        for a in bases
+        for c in bases
+    ]
+
+
+ALL_96_TRINUCLEOTIDES = _all_96_trinucleotides()
 
 
 @api_router.post("/upload", response_model=UploadResponse)
@@ -392,31 +408,44 @@ def GET_TRINUCLEOTIDE_BARCHART(
         """
         SELECT
             trinucleotide,
+            ref,
+            alt,
             count() AS cnt
         FROM nc_spark.user_results
         WHERE session_id = {sid:String}
           AND trinucleotide IS NOT NULL
           AND trinucleotide != ''
-        GROUP BY trinucleotide
+          AND ref IN ('C', 'T')
+          AND alt IS NOT NULL
+        GROUP BY trinucleotide, ref, alt
         """,
         parameters={"sid": session_id},
     )
 
     rows = result.result_rows
 
-    if not rows:
-        return BarChartResponse(categories=[], data=[[]], mode=mode)
+    # Key: (alt_centered_trinucleotide, ref, alt) → count
+    counts_map = {(row[0], row[1], row[2]): row[3] for row in rows}
 
-    categories = [row[0] for row in rows]
-    counts = [row[1] for row in rows]
+    # Label uses ref-centered trinucleotide for standard SBS-96 display
+    categories = [
+        f"{ref_tri}({ref}>{alt})"
+        for alt_tri, ref_tri, ref, alt in ALL_96_TRINUCLEOTIDES
+    ]
+    counts = [
+        counts_map.get((alt_tri, ref, alt), 0)
+        for alt_tri, ref_tri, ref, alt in ALL_96_TRINUCLEOTIDES
+    ]
 
     if mode == "frequency":
         total = sum(counts)
-        values = [round((c / total) * 100, 2) for c in counts]
+        if total == 0:
+            values = [0.0] * 96
+        else:
+            values = [round((c / total) * 100, 2) for c in counts]
     else:
         values = [float(c) for c in counts]
 
-    # Sort by value descending
     sorted_pairs = sorted(zip(categories, values), key=lambda x: x[1], reverse=True)
     categories, values = map(list, zip(*sorted_pairs))
 
@@ -615,6 +644,55 @@ def GET_DISTRIBUTIONS(
         ]
 
         distributions.append(ScoreDistribution(score=score, bins=full_bins))
+
+    return distributions
+
+
+@api_router.get(
+    "/{session_id}/group-distributions", response_model=list[ScoreDistribution]
+)
+def GET_GROUP_DISTRIBUTIONS(
+    session_id: str,
+    bins: int = 20,
+    rank_by: Literal["mean", "median", "min", "max"] = "median",
+    db: clickhouse_connect.driver.Client = Depends(get_local_db),
+):
+    bin_width = round(1.0 / bins, 6)
+
+    distributions = []
+
+    for group, group_name in GROUP_STAT_NAMES.items():
+        rank_col = f"{group_name}_{rank_by}"
+
+        result = db.query(
+            f"""
+            SELECT
+                round(floor({rank_col} / {bin_width}) * {bin_width}, 6) AS bin_start,
+                round(floor({rank_col} / {bin_width}) * {bin_width} + {bin_width}, 6) AS bin_end,
+                count() AS cnt
+            FROM nc_spark.user_results
+            WHERE session_id = {{sid:String}}
+              AND {rank_col} IS NOT NULL
+              AND {rank_col} >= 0
+              AND {rank_col} <= 1
+            GROUP BY bin_start, bin_end
+            ORDER BY bin_start
+            """,
+            parameters={"sid": session_id},
+        )
+
+        raw = {round(r[0], 6): r[2] for r in result.result_rows}
+
+        full_bins = [
+            DistributionBin(
+                bin_start=round(i * bin_width, 6),
+                bin_end=round((i + 1) * bin_width, 6),
+                count=raw.get(round(i * bin_width, 6), 0),
+            )
+            for i in range(bins)
+        ]
+
+        distributions.append(ScoreDistribution(score=rank_col, bins=full_bins))
 
     return distributions
 
