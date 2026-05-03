@@ -215,6 +215,7 @@ def annotate_chunk(
     Returns dict consumed by finalise_annotations chord callback:
         {"chunk_index": int, "rows_annotated": int, "elapsed_s": float}
     """
+    chunk_start_time = datetime.now(timezone.utc).isoformat()
     chunk_start = time.perf_counter()
     chunk_session_id = f"{session_id}_c{chunk_index}"
     variant_tuples = [tuple(v) for v in variants]
@@ -245,9 +246,10 @@ def annotate_chunk(
             f"{rows_annotated} rows in {elapsed}s"
         )
         return {
-            "chunk_index": chunk_index,
-            "rows_annotated": rows_annotated,
             "elapsed_s": elapsed,
+            "chunk_index": chunk_index,
+            "started_at": chunk_start_time,
+            "rows_annotated": rows_annotated,
             "finished_at": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -267,7 +269,9 @@ def annotate_chunk(
 
 
 @celery_app.task(bind=True, name="app.api.annotation.finalise_annotations")
-def finalise_annotations(self, chunk_results: list, session_id: str, job_start: float):
+def finalise_annotations(
+    self, chunk_results: list, session_id: str, queued_time: float
+):
     """
     Chord callback — Celery calls this automatically once every annotate_chunk
     in the chord header has returned successfully.
@@ -277,7 +281,7 @@ def finalise_annotations(self, chunk_results: list, session_id: str, job_start: 
     """
     rows_annotated = sum(r["rows_annotated"] for r in chunk_results)
     completed_at = max(datetime.fromisoformat(r["finished_at"]) for r in chunk_results)
-    job_start = datetime.fromisoformat(job_start)
+    job_start = min(datetime.fromisoformat(r["started_at"]) for r in chunk_results)
     elapsed = round((completed_at - job_start).total_seconds(), 2)
 
     print(
@@ -291,6 +295,7 @@ def finalise_annotations(self, chunk_results: list, session_id: str, job_start: 
         started_at=job_start,
         completed_at=completed_at,
         annotated_count=rows_annotated,
+        queued_at=datetime.fromisoformat(queued_time),
     )
 
 
@@ -339,7 +344,7 @@ def materialise_annotations(session_id: str, variant_count: int):
                          finalise_annotations     ← callback after all succeed
                        ).apply_async()
     """
-    job_start = datetime.now(timezone.utc).isoformat()
+    job_queue_start = datetime.now(timezone.utc).isoformat()
     local_session = get_local_background_client()
 
     try:
@@ -384,7 +389,7 @@ def materialise_annotations(session_id: str, variant_count: int):
         ]
 
         callback = finalise_annotations.s(
-            session_id=session_id, job_start=job_start
+            session_id=session_id, queued_time=job_queue_start
         ).set(queue="finalise")
 
         result = chord(header)(callback)
